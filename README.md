@@ -13,8 +13,8 @@ Cámara/Foto → Detector de caras → Extractor de características → Compara
 **Inicio rápido** (solo hace falta Docker):
 
 ```bash
-git clone <URL_NUEVA>
-cd CJAR
+git clone https://github.com/<usuario>/CJAR-entrega.git config --show-origin --get-all user.emailgit
+cd CJAR-entrega
 docker compose up --build        # interfaz web en http://localhost:8765
 ```
 
