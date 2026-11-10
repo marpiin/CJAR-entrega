@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline CJAR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Layout: una sola columna de lectura; arriba el diagrama del pipeline como "banco óptico"
+     de etapas conectadas, debajo una ficha técnica por etapa en el mismo orden. */
+  :root {
+    --bg: #f2f4f3;
+    --surface: #ffffff;
+    --fg: #15201c;
+    --muted: #5d6b66;
+    --line: #d5dcd9;
+    --accent: #0c7a61;
+    --accent-soft: #dcefe8;
+    --amber: #a8650a;
+    --amber-soft: #f7ead3;
+    --ok: #1d8a4e;
+    --bad: #c23b3b;
+    --off: #b9c3bf;
+    --code-bg: #eaeeec;
+    --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+    --body: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1513; --surface: #16201d; --fg: #e3ebe7; --muted: #93a39d; --line: #2a3632;
+      --accent: #3fcf9f; --accent-soft: #173a30; --amber: #e9a94a; --amber-soft: #3a2c15;
+      --ok: #4cd08a; --bad: #ff7a7a; --off: #3b4843; --code-bg: #1c2825; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1513; --surface: #16201d; --fg: #e3ebe7; --muted: #93a39d; --line: #2a3632;
+    --accent: #3fcf9f; --accent-soft: #173a30; --amber: #e9a94a; --amber-soft: #3a2c15;
+    --ok: #4cd08a; --bad: #ff7a7a; --off: #3b4843; --code-bg: #1c2825; color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: var(--body); font-size: 16px; line-height: 1.6;
+    padding-inline: 16px; padding-block: 40px 80px;
+  }
+  .page { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+  h1, h2, h3 { font-family: var(--display); font-weight: 700; line-height: 1.15; text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(32px, 5vw, 48px); letter-spacing: -0.02em; }
+  h2 { font-size: 26px; letter-spacing: -0.01em; }
+  h3 { font-size: 19px; }
+  p { margin: 0; }
+  code { font-family: var(--mono); font-size: 0.86em; background: var(--code-bg); padding: 1px 6px; border-radius: 5px; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+  .lede { color: var(--muted); max-width: 64ch; font-size: 17px; }
+  header { display: flex; flex-direction: column; gap: 14px; }
+
+  /* ---------- Controles ---------- */
+  .controls { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: center; }
+  .ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .ctl > span { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; padding: 3px; background: var(--surface); }
+  .seg button {
+    border: 0; background: none; color: var(--muted); font: 500 14px var(--body); cursor: pointer;
+    padding: 7px 13px; border-radius: 7px;
+  }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .seg code { background: none; padding: 0; color: inherit; }
+
+  /* ---------- Diagrama ---------- */
+  .bench {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+    padding: 28px 24px; display: flex; flex-direction: column; gap: 22px;
+  }
+  .rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; align-items: stretch; }
+  .stage {
+    position: relative; display: flex; flex-direction: column; gap: 6px; padding: 16px 14px;
+    border: 1.5px solid var(--accent); border-radius: 12px; background: var(--accent-soft);
+    margin-right: 26px; transition: opacity .25s, border-color .25s, background .25s; min-width: 0;
+  }
+  .stage:last-child { margin-right: 0; }
+  .stage::after {
+    content: ""; position: absolute; top: 50%; right: -26px; width: 26px; height: 2px; background: var(--accent);
+  }
+  .stage::before {
+    content: ""; position: absolute; top: calc(50% - 5px); right: -27px; border: 5px solid transparent;
+    border-left-color: var(--accent); border-right: 0; z-index: 1;
+  }
+  .stage:last-child::after, .stage:last-child::before { display: none; }
+  .stage .k { font-family: var(--mono); font-size: 11px; color: var(--accent); letter-spacing: 0.06em; text-transform: uppercase; }
+  .stage b { font-family: var(--display); font-size: 17px; font-weight: 700; }
+  .stage small { color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .stage .io { font-family: var(--mono); font-size: 11.5px; color: var(--fg); margin-top: auto; padding-top: 6px; border-top: 1px dashed var(--line); overflow-wrap: anywhere; }
+  .stage.skip { border-style: dashed; border-color: var(--off); background: transparent; opacity: .55; }
+  .stage.skip .k { color: var(--muted); }
+  .stage.skip::after { background: var(--off); }
+  .stage.skip::before { border-left-color: var(--off); }
+  .stage .tag {
+    position: absolute; top: -11px; left: 12px; font-family: var(--mono); font-size: 10.5px; padding: 1px 7px;
+    border-radius: 99px; background: var(--bg); border: 1px solid var(--off); color: var(--muted); display: none;
+  }
+  .stage.skip .tag { display: block; }
+  .db-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .db {
+    grid-column: 4 / 6; justify-self: stretch; display: flex; gap: 14px; align-items: center;
+    padding: 12px 16px; border: 1.5px solid var(--amber); border-radius: 12px; background: var(--amber-soft);
+    position: relative; min-width: 0;
+  }
+  .db::before { content: ""; position: absolute; left: 50%; top: -24px; height: 22px; width: 2px; background: var(--amber); }
+  .db .cyl { width: 30px; height: 36px; flex-shrink: 0; }
+  .db b { font-family: var(--display); font-size: 16px; }
+  .db small { display: block; color: var(--muted); font-size: 13px; line-height: 1.4; }
+  .db .dir { font-family: var(--mono); font-size: 11.5px; color: var(--amber); }
+  .summary {
+    display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 10px;
+    background: var(--bg); border: 1px solid var(--line); font-size: 15px;
+  }
+  .summary .ret { font-family: var(--mono); font-size: 13px; white-space: nowrap; padding: 2px 8px; border-radius: 6px; background: var(--code-bg); }
+
+  @media (max-width: 820px) {
+    .rail { grid-template-columns: minmax(0, 1fr); }
+    .stage { margin-right: 0; margin-bottom: 26px; }
+    .stage:last-child { margin-bottom: 0; }
+    .stage::after { top: auto; bottom: -26px; right: auto; left: 28px; width: 2px; height: 26px; }
+    .stage::before { top: auto; bottom: -27px; right: auto; left: 24px; border: 5px solid transparent; border-top-color: var(--accent); border-bottom: 0; }
+    .stage.skip::before { border-left-color: transparent; border-top-color: var(--off); }
+    .db-row { grid-template-columns: minmax(0, 1fr); }
+    .db { grid-column: 1; }
+    .db::before { display: none; }
+  }
+
+  /* ---------- Fichas por etapa ---------- */
+  .steps { display: flex; flex-direction: column; gap: 0; }
+  .step { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 20px; padding-block: 28px; border-top: 1px solid var(--line); }
+  .step:last-child { border-bottom: 1px solid var(--line); }
+  .num { font-family: var(--display); font-size: 40px; font-weight: 700; color: var(--accent); line-height: 1; }
+  .step-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .step-body .file { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+  .step-body ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+  .step-body li::marker { color: var(--accent); }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .fact { font-family: var(--mono); font-size: 12.5px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 99px; background: var(--surface); }
+  .fact b { color: var(--accent); font-weight: 500; }
+  pre {
+    margin: 0; font-family: var(--mono); font-size: 13px; line-height: 1.55; background: var(--code-bg);
+    padding: 14px 16px; border-radius: 10px; overflow-x: auto;
+  }
+  .note { font-size: 14.5px; color: var(--muted); border-left: 3px solid var(--amber); padding-left: 12px; }
+  @media (max-width: 560px) { .step { grid-template-columns: minmax(0, 1fr); gap: 10px; } }
+
+  /* ---------- Escala de similitud ---------- */
+  .scale-wrap { display: flex; flex-direction: column; gap: 10px; }
+  .scale-box { overflow-x: auto; }
+  .scale-box svg { display: block; width: 100%; min-width: 520px; height: auto; }
+  .scale-box text { font-family: var(--mono); font-size: 12px; fill: var(--muted); }
+  .scale-box .lbl-strong { fill: var(--fg); font-weight: 500; }
+
+  /* ---------- Tablas ---------- */
+  .tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 620px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { font-family: var(--mono); font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  td code { white-space: nowrap; }
+  .y { color: var(--ok); font-weight: 600; }
+  .n { color: var(--muted); }
+  section { display: flex; flex-direction: column; gap: 18px; }
+  .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  @media (max-width: 720px) { .two { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  footer { color: var(--muted); font-size: 14px; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">Práctica de biometría, grupo CJAR</div>
+    <h1>Cómo funciona el sistema de reconocimiento facial</h1>
+    <p class="lede">De la foto a la decisión: qué hace cada módulo, qué datos se pasan entre ellos y en qué punto cada uno de los tres flujos del enunciado se salta etapas. Todos los valores son los del código actual.</p>
+  </header>
+
+  <!-- ================= DIAGRAMA ================= -->
+  <section aria-labelledby="diag">
+    <h2 id="diag">El pipeline</h2>
+    <div class="controls">
+      <div class="ctl"><span>Flujo</span>
+        <div class="seg" role="group" aria-label="Flujo" id="flow">
+          <button type="button" data-v="full" aria-pressed="true">Completo</button>
+          <button type="button" data-v="sd" aria-pressed="false">Sin detector <code>_sd</code></button>
+          <button type="button" data-v="t" aria-pressed="false">Solo template <code>_t</code></button>
+        </div>
+      </div>
+      <div class="ctl"><span>Operación</span>
+        <div class="seg" role="group" aria-label="Operación" id="op">
+          <button type="button" data-v="ins" aria-pressed="true">Inscribir</button>
+          <button type="button" data-v="ver" aria-pressed="false">Verificar 1:1</button>
+          <button type="button" data-v="idf" aria-pressed="false">Identificar 1:N</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="bench">
+      <div class="rail">
+        <div class="stage" id="s-in">
+          <span class="tag">no aplica</span>
+          <span class="k">Entrada</span><b>Foto</b>
+          <small>Ruta, <code>Path</code>, bytes o array de NumPy</small>
+          <div class="io">→ imagen BGR H×W×3</div>
+        </div>
+        <div class="stage" id="s-det">
+          <span class="tag">se salta</span>
+          <span class="k">Detector</span><b>Detectar y alinear</b>
+          <small>SCRFD localiza la cara y 5 puntos; se alinea a la plantilla ArcFace</small>
+          <div class="io">→ cara 112×112</div>
+        </div>
+        <div class="stage" id="s-ext">
+          <span class="tag">se salta</span>
+          <span class="k">Extractor</span><b>Template</b>
+          <small>ArcFace (MobileFaceNet) convierte la cara en un vector</small>
+          <div class="io">→ vector 512-D, ‖v‖ = 1</div>
+        </div>
+        <div class="stage" id="s-val">
+          <span class="k">Validación</span><b>Comprobar vector</b>
+          <small>512 valores, sin NaN/∞, norma &gt; 0; se normaliza</small>
+          <div class="io" id="val-io">→ template válido</div>
+        </div>
+        <div class="stage" id="s-end">
+          <span class="k" id="end-k">Base de datos</span><b id="end-b">Guardar</b>
+          <small id="end-s">Inserta o sustituye la fila del id en el CSV</small>
+          <div class="io" id="end-io">→ True / False</div>
+        </div>
+      </div>
+      <div class="db-row">
+        <div class="db">
+          <svg class="cyl" viewBox="0 0 30 36" aria-hidden="true"><ellipse cx="15" cy="6" rx="13" ry="5" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--amber)"/><path d="M2 6v24c0 2.8 5.8 5 13 5s13-2.2 13-5V6M2 18c0 2.8 5.8 5 13 5s13-2.2 13-5" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--amber)"/></svg>
+          <div><b>database/database.csv</b><small>Columnas <code>id,template</code>; 512 floats separados por <code>;</code></small><span class="dir" id="db-dir">▲ escribe</span></div>
+        </div>
+      </div>
+      <div class="summary"><span class="ret" id="sum-ret">inscribir(id, foto)</span><span id="sum-txt"></span></div>
+    </div>
+  </section>
+
+  <!-- ================= ETAPAS ================= -->
+  <section aria-labelledby="etapas">
+    <h2 id="etapas">Etapa por etapa</h2>
+    <div class="steps">
+
+      <article class="step">
+        <div class="num">1</div>
+        <div class="step-body">
+          <h3>Entrada: cargar la foto</h3>
+          <div class="file">parse_input_image() en src/utils.py</div>
+          <p>Cualquier formato de foto se convierte a una imagen OpenCV en BGR con 3 canales, que es lo que esperan el detector y el extractor.</p>
+          <ul>
+            <li><code>str</code> / <code>Path</code>: se comprueba que el archivo existe y se lee con <code>cv2.imread</code>.</li>
+            <li><code>bytes</code>: se decodifican con <code>cv2.imdecode</code> (así llegan las fotos de la web).</li>
+            <li><code>np.ndarray</code>: escala de grises → BGR, RGBA → BGR, 3 canales se copia tal cual.</li>
+            <li>Vacío, <code>None</code>, archivo que no es imagen o tipo raro → excepción controlada.</li>
+          </ul>
+          <p class="note">En la interfaz web, el navegador gira la foto según su orientación EXIF y la reduce a 1600 px de lado máximo antes de enviarla. OpenCV ignora el EXIF: una foto de móvil sin girar llegaría tumbada y el detector no encontraría la cara.</p>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="num">2</div>
+        <div class="step-body">
+          <h3>Detector: localizar y alinear la cara</h3>
+          <div class="file">FaceDetector.detect_and_align() en src/detector.py</div>
+          <div class="facts">
+            <span class="fact">modelo <b>det_500m</b> (SCRFD, pack buffalo_s)</span>
+            <span class="fact">entrada <b>640×640</b></span>
+            <span class="fact">salida <b>112×112 BGR</b></span>
+            <span class="fact">CPU <b>ctx_id = -1</b></span>
+          </div>
+          <ul>
+            <li>El detector devuelve para cada cara un recuadro y 5 puntos clave: los dos ojos, la nariz y las dos comisuras de la boca.</li>
+            <li>Si hay varias caras, se queda con la de <strong>mayor área</strong>.</li>
+            <li>Con los 5 puntos se calcula una transformación de similitud (giro, escala y traslación) que los lleva a las posiciones fijas de la plantilla ArcFace, y se recorta a 112×112 (<code>face_align.norm_crop</code>).</li>
+            <li>Sin cara o con puntos no válidos → <code>ValueError</code>. Así el extractor nunca genera un template a partir de ruido.</li>
+          </ul>
+          <p class="note">El alineamiento es lo que permite reconocer a la misma persona con otra pose. La primera versión solo recortaba el recuadro y lo estiraba, y una foto de la misma persona desde otro ángulo no pasaba la verificación.</p>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="num">3</div>
+        <div class="step-body">
+          <h3>Extractor: de cara a template</h3>
+          <div class="file">FeatureExtractor.extract() en src/extractor.py</div>
+          <div class="facts">
+            <span class="fact">modelo <b>w600k_mbf</b> (ArcFace, MobileFaceNet)</span>
+            <span class="fact">entrenado con <b>WebFace600K</b></span>
+            <span class="fact">salida <b>512 floats</b></span>
+          </div>
+          <ul>
+            <li>Si la imagen no mide 112×112 se redimensiona (esto solo pasa en el flujo <code>_sd</code>).</li>
+            <li>La red normaliza los píxeles a <code>(x − 127.5) / 127.5</code>, pasa de BGR a RGB y produce el embedding.</li>
+            <li>El vector se valida y se divide por su norma: todos los templates tienen longitud 1.</li>
+          </ul>
+          <pre>cara 112×112×3  ──ArcFace──▶  [ 0.0139, -0.0473, 0.0341, … ]   (512 valores, ‖v‖ = 1)</pre>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="num">4</div>
+        <div class="step-body">
+          <h3>Validación del template</h3>
+          <div class="file">parse_input_template() en src/utils.py</div>
+          <p>Todo vector pasa por aquí antes de guardarse o compararse, venga del extractor, del CSV o de fuera (flujo <code>_t</code>). Es la principal defensa ante los ataques del otro grupo.</p>
+          <ul>
+            <li>Acepta array, lista, tupla o texto con separador <code>;</code>, <code>,</code> o espacios.</li>
+            <li>Rechaza si no hay exactamente <strong>512</strong> valores, si hay <code>NaN</code> o infinitos, o si es un vector de ceros.</li>
+            <li>Devuelve el vector en <code>float32</code> normalizado a norma 1.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="num">5</div>
+        <div class="step-body">
+          <h3>Inscribir: guardar en la base de datos</h3>
+          <div class="file">BiometricDatabase.save_template() en src/database.py y average_templates() en src/utils.py</div>
+          <ul>
+            <li>Con <strong>una foto</strong> se guarda su template. Con una <strong>lista de fotos</strong> se calcula el template de cada una, se hace la media y se vuelve a normalizar. La media representa mejor a la persona en distintos ángulos y luces.</li>
+            <li>Si alguna foto de la lista falla (por ejemplo, sin cara), no se inscribe nada y devuelve <code>False</code>.</li>
+            <li>El id se limpia de espacios y no puede estar vacío. Si ya existía, su template se sustituye: nunca hay ids duplicados.</li>
+            <li>El CSV se reescribe entero, con cada valor en 7 decimales.</li>
+          </ul>
+          <pre>id,template
+persona_01,0.0138576;-0.0472953;0.0341282;…;0.0212609      ← 512 valores</pre>
+          <p class="note">Al leer, cada fila se valida de nuevo. Una fila manipulada a mano (letras, NaN, vector incompleto) se descarta sin romper nada, y el resto de personas siguen funcionando.</p>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="num">6</div>
+        <div class="step-body">
+          <h3>Comparador: similitud coseno y decisión</h3>
+          <div class="file">Matcher en src/matcher.py</div>
+          <p>Como los dos vectores tienen norma 1, el producto escalar es exactamente el coseno del ángulo entre ellos: 1 si son idénticos, cerca de 0 si no tienen nada que ver.</p>
+          <pre>similitud = t_consulta · t_inscrito        (recortada a [-1, 1])
+coincide  = similitud ≥ 0.48</pre>
+          <div class="two">
+            <div class="panel">
+              <h3>Verificar 1:1</h3>
+              <p>Se busca el template del <code>id</code> indicado y se compara solo con él. Si el id no existe, devuelve <code>False</code> directamente.</p>
+              <p><code>verificar(id, foto)</code> → <code>True</code> / <code>False</code></p>
+            </div>
+            <div class="panel">
+              <h3>Identificar 1:N</h3>
+              <p>Se compara con <strong>todos</strong> los templates válidos del CSV y se queda con la mejor puntuación. Si esa puntuación no llega al umbral, la persona es desconocida.</p>
+              <p><code>identificar(foto)</code> → <code>id</code> / <code>None</code></p>
+            </div>
+          </div>
+          <div class="scale-wrap">
+            <div class="scale-box" role="img" aria-label="Escala de similitud de 0 a 1 con el umbral en 0.48: por debajo se rechaza, por encima se acepta">
+              <svg viewBox="0 0 640 86">
+                <rect x="20" y="22" width="600" height="14" rx="7" fill="var(--code-bg)"/>
+                <rect x="20" y="22" width="288" height="14" rx="7" fill="var(--bad)" opacity="0.28"/>
+                <rect x="308" y="22" width="312" height="14" rx="7" fill="var(--ok)" opacity="0.3"/>
+                <line x1="308" y1="12" x2="308" y2="46" stroke="var(--fg)" stroke-width="2"/>
+                <text x="308" y="9" text-anchor="middle" class="lbl-strong">umbral 0.48</text>
+                <text x="20" y="62">0.0</text>
+                <text x="170" y="62" text-anchor="middle">0.25</text>
+                <text x="320" y="62" text-anchor="middle">0.5</text>
+                <text x="470" y="62" text-anchor="middle">0.75</text>
+                <text x="620" y="62" text-anchor="end">1.0</text>
+                <text x="164" y="80" text-anchor="middle">personas distintas → rechaza</text>
+                <text x="464" y="80" text-anchor="middle">misma persona → acepta</text>
+              </svg>
+            </div>
+            <p class="note">Subir el umbral reduce los falsos aceptados (FAR) pero rechaza más veces a la persona correcta (FRR). Bajarlo hace lo contrario. En la pestaña Comparar de la web se puede probar con fotos reales.</p>
+          </div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ================= FLUJOS ================= -->
+  <section aria-labelledby="flujos">
+    <h2 id="flujos">Los 9 métodos del enunciado</h2>
+    <p class="lede">Tres operaciones por tres flujos. Los flujos solo cambian por dónde entra el dato; la validación, la base de datos y el comparador son siempre los mismos.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Flujo</th><th>Métodos</th><th>Detector</th><th>Extractor</th><th>Cuándo tiene sentido</th></tr></thead>
+        <tbody>
+          <tr><td>Completo</td><td><code>inscribir</code>, <code>verificar</code>, <code>identificar</code></td><td class="y">Sí</td><td class="y">Sí</td><td>Uso normal: fotos de cualquier tamaño y encuadre.</td></tr>
+          <tr><td>Sin detector</td><td><code>inscribir_sd</code>, <code>verificar_sd</code>, <code>identificar_sd</code></td><td class="n">No</td><td class="y">Sí</td><td>La imagen ya es una cara recortada. Con una foto normal la cara queda pequeña al reducir a 112×112 y el resultado empeora mucho.</td></tr>
+          <tr><td>Solo template</td><td><code>inscribir_t</code>, <code>verificar_t</code>, <code>identificar_t</code></td><td class="n">No</td><td class="n">No</td><td>Se pasa el vector de 512 directamente (array, lista o texto). Es el flujo que más usarán los ataques.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= ROBUSTEZ ================= -->
+  <section aria-labelledby="ataques">
+    <h2 id="ataques">Qué pasa ante un ataque</h2>
+    <p class="lede">Ningún método lanza excepciones: todo está envuelto en <code>try/except</code> y responde <code>False</code> o <code>None</code>. Estos casos están cubiertos en <code>tests/test_system.py</code>.</p>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Ataque</th><th>Dónde se para</th><th>Resultado</th></tr></thead>
+        <tbody>
+          <tr><td>Template con 128 valores en vez de 512</td><td>Validación del template</td><td><code>False</code> / <code>None</code></td></tr>
+          <tr><td>Template con <code>NaN</code> o infinito</td><td>Validación del template</td><td><code>False</code> / <code>None</code></td></tr>
+          <tr><td>Vector de ceros (norma nula)</td><td>Validación del template</td><td><code>False</code></td></tr>
+          <tr><td>Imagen sin caras o fondo abstracto</td><td>Detector</td><td><code>False</code> / <code>None</code></td></tr>
+          <tr><td>Archivo que no es una imagen, o bytes vacíos</td><td>Carga de la foto</td><td><code>False</code> / <code>None</code></td></tr>
+          <tr><td>Filas basura añadidas a mano en el CSV</td><td>Lectura de la base de datos</td><td>Se ignoran; el resto sigue funcionando</td></tr>
+          <tr><td>CSV borrado o vacío</td><td>Base de datos</td><td>Se recrea con la cabecera <code>id,template</code></td></tr>
+          <tr><td>Verificar un id que no existe</td><td>Base de datos</td><td><code>False</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= EJECUCIÓN ================= -->
+  <section aria-labelledby="ejec">
+    <h2 id="ejec">Cómo se ejecuta</h2>
+    <div class="two">
+      <div class="panel">
+        <h3>Docker</h3>
+        <p>Desde la raíz del repositorio, <code>docker compose up --build</code> instala las dependencias, descarga los modelos dentro de la imagen y arranca la interfaz web en <code>http://localhost:8765</code>, solo accesible desde el propio ordenador.</p>
+        <p>La carpeta <code>database/</code> es un volumen: los datos se quedan en tu ordenador y no se suben a GitHub.</p>
+      </div>
+      <div class="panel">
+        <h3>Interfaz web</h3>
+        <p><code>web/app.py</code> (FastAPI) reutiliza los mismos módulos y además devuelve la puntuación y la cara alineada, para ver por qué se acepta o se rechaza.</p>
+        <p>Pestañas: Inscribir (una o varias fotos), Verificar, Identificar (5 mejores), Comparar dos fotos y Base de datos.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>Grupo CJAR. Sistema biométrico con InsightFace buffalo_s y umbral 0.48.</footer>
+</div>
+
+<script>
+(() => {
+  const state = { flow: 'full', op: 'ins' };
+  const OPS = {
+    ins: {
+      k: 'Base de datos', b: 'Guardar', s: 'Inserta o sustituye la fila del id en el CSV', io: '→ True / False', dir: '▲ escribe',
+      call: { full: 'inscribir(id, foto)', sd: 'inscribir_sd(id, foto)', t: 'inscribir_t(id, template)' },
+      txt: 'Guarda el template en el CSV. Con una lista de fotos guarda la media de sus templates. Devuelve True si se ha guardado.'
+    },
+    ver: {
+      k: 'Comparador', b: 'Comparar 1:1', s: 'Similitud coseno con el template del id; acepta si ≥ 0.48', io: '→ True / False', dir: '▼ lee el template del id',
+      call: { full: 'verificar(id, foto)', sd: 'verificar_sd(id, foto)', t: 'verificar_t(id, template)' },
+      txt: 'Lee el template del id y lo compara con el nuevo. Devuelve True si la similitud llega al umbral; False si no llega o si el id no existe.'
+    },
+    idf: {
+      k: 'Comparador', b: 'Buscar 1:N', s: 'Similitud con todos; se queda con la mejor si ≥ 0.48', io: '→ id / None', dir: '▼ lee todos los templates',
+      call: { full: 'identificar(foto)', sd: 'identificar_sd(foto)', t: 'identificar_t(template)' },
+      txt: 'Compara con todas las personas del CSV. Devuelve el id con mayor similitud si llega al umbral; si no, None (persona desconocida).'
+    }
+  };
+  const FLOW_NOTE = {
+    full: '',
+    sd: ' La foto entera se reduce a 112×112 y entra directa al extractor.',
+    t: ' Se recibe el vector de 512 ya hecho: no hay foto ni red neuronal.'
+  };
+  const $ = id => document.getElementById(id);
+
+  function render() {
+    const o = OPS[state.op];
+    $('s-in').classList.toggle('skip', state.flow === 't');
+    $('s-det').classList.toggle('skip', state.flow !== 'full');
+    $('s-ext').classList.toggle('skip', state.flow === 't');
+    $('val-io').textContent = state.flow === 't' ? '← template externo' : '→ template válido';
+    $('end-k').textContent = o.k; $('end-b').textContent = o.b; $('end-s').textContent = o.s; $('end-io').textContent = o.io;
+    $('db-dir').textContent = o.dir;
+    $('sum-ret').textContent = o.call[state.flow];
+    $('sum-txt').textContent = o.txt + FLOW_NOTE[state.flow];
+  }
+  function bind(groupId, key) {
+    document.querySelectorAll('#' + groupId + ' button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state[key] = btn.dataset.v;
+        document.querySelectorAll('#' + groupId + ' button').forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+        render();
+      });
+    });
+  }
+  bind('flow', 'flow'); bind('op', 'op'); render();
+})();
+</script>
+</body>
+</html>

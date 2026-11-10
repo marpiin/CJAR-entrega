@@ -1,0 +1,11 @@
+# Dependencias directas con versión exacta. Las indirectas se fijan en requirements.lock
+# (pip install -r requirements.txt -c requirements.lock). pandas y scipy se han quitado de
+# aquí porque el código no los usa (scipy sigue llegando como dependencia de insightface).
+numpy==2.4.6
+opencv-python-headless==5.0.0.93
+pillow==13.0.0
+insightface==2.1
+onnxruntime==1.31.1
+fastapi==0.162.2
+uvicorn==0.54.0
+python-multipart==0.0.33

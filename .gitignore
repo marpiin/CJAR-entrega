@@ -1,0 +1,35 @@
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Modelos descargados de InsightFace / ONNX
+*.onnx
+.insightface/
+models/
+
+# VS Code y SO
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Base de datos biométrica: solo se sube la oficial (51 personas) para el grupo rival
+database/*
+!database/database.csv
+database/*.tmp
+
+# Fotos (dataset del profesor y persona extra): no se suben, se cargan con cargar_dataset.py
+fotos/
+
+# Secretos y configuración local de Docker Compose (CJAR_ADMIN_TOKEN, CJAR_UID...): nunca al repositorio
+.env
+.env.*
+!.env.example
+
+# Editores: configuración local
+.idea/

@@ -1,0 +1,48 @@
+services:
+  cjar:
+    build: .
+    image: cjar-biometria
+    container_name: cjar-biometria
+    ports:
+      # Interfaz web solo accesible desde este ordenador: http://localhost:8765
+      - "127.0.0.1:8765:8000"
+    environment:
+      # Clave de administración (inscribir/borrar). Si se deja vacía, se genera una al
+      # arrancar y se muestra en: docker compose logs cjar
+      CJAR_ADMIN_TOKEN: ${CJAR_ADMIN_TOKEN:-}
+    # Contenedor sin privilegios y con recursos acotados: una petición maliciosa no puede
+    # tumbar el ordenador ni escribir fuera de database/ y fotos/
+    # Usuario con el que corre el contenedor. Por defecto 1000:1000 (el usuario 'cjar' de la imagen).
+    # Si database/ y fotos/ son de otro usuario de tu equipo (comprueba con `id -u` y `id -g`):
+    #   CJAR_UID=$(id -u) CJAR_GID=$(id -g) docker compose up --build
+    # o pon esas dos variables en un fichero .env junto a este. Otra opción: chown 1000:1000 database fotos
+    user: "${CJAR_UID:-1000}:${CJAR_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    cpus: 2
+    mem_limit: 3g
+    memswap_limit: 3g
+    pids_limit: 256
+    # Rotación del log del contenedor: sin esto Docker lo deja crecer sin límite (con max-size 10m y
+    # max-file 3 ocupa como mucho ~30 MB)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      # La BD (database.csv) se guarda en tu máquina, en ./database
+      - ./database:/app/database
+      # Carpeta opcional para pasar fotos al contenedor
+      - ./fotos:/app/fotos
+      # El código se monta en vivo pero de solo lectura: los cambios en src/ se aplican sin
+      # reconstruir y el contenedor no puede modificarlos
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./web:/app/web:ro
+      - ./main.py:/app/main.py:ro
+      - ./cargar_dataset.py:/app/cargar_dataset.py:ro

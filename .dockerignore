@@ -1,0 +1,15 @@
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.vscode/
+.git/
+database/
+docs/
+fotos/
+README.md
+# Secretos: no entran en el contexto de build ni, por tanto, en la imagen
+.env
+.env.*
+.idea/

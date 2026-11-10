@@ -1,0 +1,3 @@
+# Dependencias solo para los tests (fastapi.testclient necesita httpx2)
+-c requirements.lock
+httpx2==2.16.0
