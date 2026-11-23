@@ -233,14 +233,14 @@
         </div>
         <div class="stage" id="s-end">
           <span class="k" id="end-k">Base de datos</span><b id="end-b">Guardar</b>
-          <small id="end-s">Inserta o sustituye la fila del id en el CSV</small>
+          <small id="end-s">Cifra la plantilla y vuelve a sellar el CSV</small>
           <div class="io" id="end-io">→ True / False</div>
         </div>
       </div>
       <div class="db-row">
         <div class="db">
           <svg class="cyl" viewBox="0 0 30 36" aria-hidden="true"><ellipse cx="15" cy="6" rx="13" ry="5" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--amber)"/><path d="M2 6v24c0 2.8 5.8 5 13 5s13-2.2 13-5V6M2 18c0 2.8 5.8 5 13 5s13-2.2 13-5" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--amber)"/></svg>
-          <div><b>database/database.csv</b><small>Columnas <code>id,template</code>; 512 floats separados por <code>;</code></small><span class="dir" id="db-dir">▲ escribe</span></div>
+          <div><b>database/database.csv</b><small>Columnas <code>id,template</code>; plantillas cifradas y fichero sellado</small><span class="dir" id="db-dir">▲ escribe</span></div>
         </div>
       </div>
       <div class="summary"><span class="ret" id="sum-ret">inscribir(id, foto)</span><span id="sum-txt"></span></div>
@@ -330,12 +330,14 @@
           <ul>
             <li>Con <strong>una foto</strong> se guarda su template. Con una <strong>lista de fotos</strong> se calcula el template de cada una, se hace la media y se vuelve a normalizar. La media representa mejor a la persona en distintos ángulos y luces.</li>
             <li>Si alguna foto de la lista falla (por ejemplo, sin cara), no se inscribe nada y devuelve <code>False</code>.</li>
-            <li>El id se limpia de espacios y no puede estar vacío. Si ya existía, su template se sustituye: nunca hay ids duplicados.</li>
-            <li>El CSV se reescribe entero, con cada valor en 7 decimales.</li>
+            <li>El id se limpia de espacios y no puede estar vacío. Si ya existía devuelve <code>False</code> (salvo <code>reemplazar=True</code>). Tampoco se inscribe a quien se parezca a otra persona ni con un id que se confunda con otro (salvo <code>permitir_parecido=True</code>).</li>
+            <li>Con varias fotos, todas tienen que ser de la misma persona.</li>
+            <li>El CSV se reescribe entero: cada plantilla cifrada con AES-256-GCM ligada a su id y, al final, un sello HMAC de todo el fichero. La clave está fuera del CSV (<code>clave/bd.key</code>).</li>
           </ul>
           <pre>id,template
-persona_01,0.0138576;-0.0472953;0.0341282;…;0.0212609      ← 512 valores</pre>
-          <p class="note">Al leer, cada fila se valida de nuevo. Una fila manipulada a mano (letras, NaN, vector incompleto) se descarta sin romper nada, y el resto de personas siguen funcionando.</p>
+persona_01,cjar1:RKkmi5bFsTYu2xnxXYU27IS23OAS…      ← plantilla cifrada
+__sello__,cjar1:50:hp5rE6lgkDEtjApUrceNKzAM…      ← sello del fichero</pre>
+          <p class="note">Al leer se comprueba el sello y cada fila. Si alguien ha tocado el fichero (añadir, cambiar, mover o borrar filas) el sistema lo rechaza entero y no reconoce a nadie hasta restaurarlo: nunca una suplantación.</p>
         </div>
       </article>
 
@@ -402,7 +404,7 @@ coincide  = similitud ≥ 0.48</pre>
   <!-- ================= ROBUSTEZ ================= -->
   <section aria-labelledby="ataques">
     <h2 id="ataques">Qué pasa ante un ataque</h2>
-    <p class="lede">Ningún método lanza excepciones: todo está envuelto en <code>try/except</code> y responde <code>False</code> o <code>None</code>. Estos casos están cubiertos en <code>tests/test_system.py</code>.</p>
+    <p class="lede">Ningún método lanza excepciones: todo está envuelto en <code>try/except</code> y responde <code>False</code> o <code>None</code>. Estos casos están cubiertos en <code>tests/</code>.</p>
     <div class="tbl">
       <table>
         <thead><tr><th>Ataque</th><th>Dónde se para</th><th>Resultado</th></tr></thead>
@@ -412,8 +414,11 @@ coincide  = similitud ≥ 0.48</pre>
           <tr><td>Vector de ceros (norma nula)</td><td>Validación del template</td><td><code>False</code></td></tr>
           <tr><td>Imagen sin caras o fondo abstracto</td><td>Detector</td><td><code>False</code> / <code>None</code></td></tr>
           <tr><td>Archivo que no es una imagen, o bytes vacíos</td><td>Carga de la foto</td><td><code>False</code> / <code>None</code></td></tr>
-          <tr><td>Filas basura añadidas a mano en el CSV</td><td>Lectura de la base de datos</td><td>Se ignoran; el resto sigue funcionando</td></tr>
-          <tr><td>CSV borrado o vacío</td><td>Base de datos</td><td>Se recrea con la cabecera <code>id,template</code></td></tr>
+          <tr><td>Plantilla robada del CSV</td><td>Cifrado</td><td><code>False</code> / <code>None</code></td></tr>
+          <tr><td>CSV editado, truncado o borrado</td><td>Sello de la base de datos</td><td>Se rechaza entero y queda en el log</td></tr>
+          <tr><td>Plantilla «lobo» (media de varias personas)</td><td>Margen del comparador</td><td>No coincide con varias a la vez</td></tr>
+          <tr><td>Imagen lisa o ruido sin detector (<code>_sd</code>)</td><td>Calidad en el extractor</td><td><code>False</code> / <code>None</code></td></tr>
+          <tr><td>Ruido invisible sobre la foto de otro</td><td>Estabilidad al suavizar</td><td><code>False</code> (si el atacante conoce la defensa, ver README)</td></tr>
           <tr><td>Verificar un id que no existe</td><td>Base de datos</td><td><code>False</code></td></tr>
         </tbody>
       </table>
@@ -427,7 +432,7 @@ coincide  = similitud ≥ 0.48</pre>
       <div class="panel">
         <h3>Docker</h3>
         <p>Desde la raíz del repositorio, <code>docker compose up --build</code> instala las dependencias, descarga los modelos dentro de la imagen y arranca la interfaz web en <code>http://localhost:8765</code>, solo accesible desde el propio ordenador.</p>
-        <p>La carpeta <code>database/</code> es un volumen: los datos se quedan en tu ordenador y no se suben a GitHub.</p>
+        <p>La carpeta <code>database/</code> es un volumen: los datos se quedan en tu ordenador.</p>
       </div>
       <div class="panel">
         <h3>Interfaz web</h3>
@@ -445,7 +450,7 @@ coincide  = similitud ≥ 0.48</pre>
   const state = { flow: 'full', op: 'ins' };
   const OPS = {
     ins: {
-      k: 'Base de datos', b: 'Guardar', s: 'Inserta o sustituye la fila del id en el CSV', io: '→ True / False', dir: '▲ escribe',
+      k: 'Base de datos', b: 'Guardar', s: 'Cifra la plantilla y vuelve a sellar el CSV', io: '→ True / False', dir: '▲ escribe',
       call: { full: 'inscribir(id, foto)', sd: 'inscribir_sd(id, foto)', t: 'inscribir_t(id, template)' },
       txt: 'Guarda el template en el CSV. Con una lista de fotos guarda la media de sus templates. Devuelve True si se ha guardado.'
     },

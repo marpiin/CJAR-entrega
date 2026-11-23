@@ -8,34 +8,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     OPENCV_IO_MAX_IMAGE_PIXELS=40000000
 
-# Librerías de sistema que necesitan OpenCV / onnxruntime. OJO: requirements.txt pide
-# opencv-python-headless, pero insightface arrastra opencv-python (con GUI) y pip instala los dos
-# en site-packages/cv2/: el cv2 que queda cargado es el de opencv-python (build con Qt/GUI, medido
-# en esta imagen), NO el headless. Por eso hacen falta las librerías de X11/GL. No se cambian las
-# dependencias; ver «Limitaciones conocidas» (i) en el README. Ya no hace falta compilar nada.
+# Librerías de sistema que necesitan OpenCV (headless) y onnxruntime
 # apt-get upgrade trae los parches de seguridad de Debian publicados desde que se creó la imagen
 # base (p. ej. zlib1g); el resto de paquetes quedan como los fija el digest.
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
         libgomp1 \
-        libgl1 \
-        libxcb1 \
-        libsm6 \
-        libxext6 \
-        libxrender1 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /usr/sbin/nologin cjar
 
 WORKDIR /app
 
-# Versiones exactas (requirements.txt) y todo el árbol de dependencias fijado (requirements.lock).
+# Todo el árbol de dependencias con versión exacta y SHA-256: un paquete sustituido en PyPI no se instala.
+# --no-deps: no entra nada que no esté en la lista (tampoco opencv-python, el build con Qt que pide insightface).
 # INSTALL_DEV=1 añade lo necesario para los tests web (httpx2).
-COPY requirements.txt requirements.lock requirements-dev.txt ./
+COPY requirements.txt requirements.lock requirements-dev.txt requirements-hash.txt requirements-dev-hash.txt ./
 ARG INSTALL_DEV=0
 # pip, setuptools y wheel de la imagen base se actualizan a versiones con los parches de seguridad publicados
 RUN pip install --upgrade pip==26.3 setuptools==84.2.1 wheel==0.46.2 \
-    && pip install -r requirements.txt -c requirements.lock \
-    && if [ "$INSTALL_DEV" = "1" ]; then pip install -r requirements-dev.txt; fi
+    && pip install --no-deps --require-hashes -r requirements-hash.txt \
+    && if [ "$INSTALL_DEV" = "1" ]; then pip install --no-deps --require-hashes -r requirements-dev-hash.txt; fi
 
 # Los modelos se descargan en el build (el contenedor arranca sin internet) y se comprueba
 # su SHA-256 antes de usarlos. Pertenecen a root: el usuario de la app no puede cambiarlos.
@@ -54,10 +46,11 @@ COPY src ./src
 COPY web ./web
 COPY tests ./tests
 COPY docker ./docker
-COPY main.py cargar_dataset.py Dockerfile docker-compose.yml .gitignore .dockerignore ./
+COPY main.py cargar_dataset.py admin_bd.py Dockerfile docker-compose.yml .gitignore .dockerignore .gitattributes ./
 RUN mkdir -p /app/database /app/fotos && chown cjar:cjar /app/database /app/fotos
 
-# La base de datos vive en un volumen para que persista y no se meta en la imagen
+# La base de datos vive en un volumen para que persista y no se meta en la imagen; su clave (clave/) tampoco
+# va en la imagen: se monta de solo lectura al arrancar (docker-compose.yml)
 VOLUME ["/app/database"]
 
 USER cjar

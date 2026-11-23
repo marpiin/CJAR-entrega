@@ -198,7 +198,7 @@ async function api(path, form, btn, avisos = []) {
     const data = await r.json().catch(() => ({}));
     if (avisos.includes(r.status)) return { conflicto: r.status, ...data };
     if (r.status === 401) throw new Error(NO_KEY);
-    if (!r.ok) throw new Error(data.detail || 'El servidor ha devuelto un error.');
+    if (!r.ok) throw new Error((data.detail && data.detail.texto) || (typeof data.detail === 'string' && data.detail) || 'El servidor ha devuelto un error.');
     return data;
   } catch (e) {
     toast(e.message === 'Failed to fetch' ? 'No hay conexión con el servidor. Comprueba que está arrancado.' : e.message);
@@ -239,7 +239,7 @@ function show(el, html) {
 const ZONA_MIN = 0.01; // por debajo de esto la zona apenas influye en la similitud
 const lista = xs => xs.length > 1 ? xs.slice(0, -1).join(', ') + ' y ' + xs[xs.length - 1] : xs[0];
 function cotejo(x, labels, nota = '') {
-  if (!x) return '';
+  if (!x) return keyInput.value.trim() ? '' : '<p class="aside">Con la clave de administración se muestra además en qué zonas de la cara se parecen.</p>';
   const max = Math.max(0.02, ...x.regiones.map(r => Math.abs(r.aporte)));
   const si = x.regiones.filter(r => r.aporte >= ZONA_MIN).map(r => esc(r.nombre.toLowerCase()));
   const no = x.regiones.filter(r => r.aporte <= -ZONA_MIN).map(r => esc(r.nombre.toLowerCase())).reverse();
@@ -285,17 +285,26 @@ $('#ins-go').onclick = async e => {
   if (!id) return toast('Escribe un identificador.');
   const blobs = pickers.ins.blobs;
   if (!blobs.length) return toast('Añade al menos una foto.');
-  const form = (reemplazar = false) => {
+  const form = (reemplazar = false, parecido = false) => {
     const f = new FormData(); f.append('id', id);
     if (reemplazar) f.append('reemplazar', 'true');
+    if (parecido) f.append('permitir_parecido', 'true');
     blobs.forEach((b, i) => f.append('fotos', b, `foto${i + 1}.jpg`));
     return f;
   };
   const btn = e.currentTarget;
   let d = await api('/api/inscribir', form(), btn, [409]);
-  if (d && d.conflicto) {
-    if (!(await asyncConfirm(`«${id}» ya está inscrito. ¿Sustituir su plantilla por la de estas fotos?`, 'Sustituir'))) return;
-    d = await api('/api/inscribir', form(true), btn);
+  let reemplazar = false, parecido = false;
+  while (d && d.conflicto) {
+    const motivo = (d.detail && d.detail.motivo) || '';
+    if (motivo === 'existe' && !reemplazar) {
+      if (!(await asyncConfirm(`«${id}» ya está inscrito. ¿Sustituir su plantilla por la de estas fotos?`, 'Sustituir'))) return;
+      reemplazar = true;
+    } else if (motivo === 'parecido' && !parecido) {
+      if (!(await asyncConfirm(`${d.detail.texto} Inscríbela solo si es otra persona (por ejemplo, un gemelo) y lo has comprobado por otro medio. ¿Continuar?`, 'Inscribir'))) return;
+      parecido = true;
+    } else return toast((d.detail && d.detail.texto) || 'No se ha podido inscribir.');
+    d = await api('/api/inscribir', form(reemplazar, parecido), btn, [409]);
   }
   if (!d) return;
   const n = d.caras.length;

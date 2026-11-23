@@ -37,6 +37,8 @@ services:
     volumes:
       # La BD (database.csv) se guarda en tu máquina, en ./database
       - ./database:/app/database
+      # Clave de la BD, fuera de la carpeta de la BD y de solo lectura
+      - ./clave:/app/clave:ro
       # Carpeta opcional para pasar fotos al contenedor
       - ./fotos:/app/fotos
       # El código se monta en vivo pero de solo lectura: los cambios en src/ se aplican sin
@@ -46,3 +48,4 @@ services:
       - ./web:/app/web:ro
       - ./main.py:/app/main.py:ro
       - ./cargar_dataset.py:/app/cargar_dataset.py:ro
+      - ./admin_bd.py:/app/admin_bd.py:ro

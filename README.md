@@ -13,12 +13,14 @@ Cámara/Foto → Detector de caras → Extractor de características → Compara
 **Inicio rápido** (solo hace falta Docker):
 
 ```bash
-git clone https://github.com/<usuario>/CJAR-entrega.git config --show-origin --get-all user.emailgit
+git clone https://github.com/marpiin/CJAR-entrega.git
 cd CJAR-entrega
 docker compose up --build        # interfaz web en http://localhost:8765
 ```
 
-La BD ya viene con las personas inscritas (`database/database.csv`), así que el sistema se puede usar nada más clonarlo.
+La BD ya viene con las personas inscritas (`database/database.csv`) y su clave (`clave/bd.key`), así que el sistema se puede usar nada más clonarlo.
+
+**Vulnerabilidades y fortalezas que conocemos:** [`INFORME.md`](INFORME.md).
 
 ## 1. Qué estamos haciendo
 
@@ -26,9 +28,10 @@ La BD ya viene con las personas inscritas (`database/database.csv`), así que el
 |---|---|---|
 | Detector | `src/detector.py` | Localiza la cara principal de la foto con InsightFace (modelo `buffalo_s`) y la alinea a 112x112 px con sus 5 puntos faciales |
 | Extractor | `src/extractor.py` | Convierte la cara en un *template*: un vector de 512 números (ArcFace), normalizado a norma 1 |
-| Comparador | `src/matcher.py` | Similitud coseno entre templates. Si es `>= 0.48` (umbral) se considera la misma persona |
+| Comparador | `src/matcher.py` | Similitud coseno entre templates. Se considera la misma persona si es `>= 0.48` (umbral) y ninguna otra persona inscrita queda a menos de `0.05` (margen) |
 | Explicador | `src/explicador.py` | Trazabilidad: dice en qué zonas de la cara (ojos, nariz, boca...) se apoya el parecido entre dos caras, tapando cada zona y midiendo cuánto cae la similitud (análisis por oclusión) |
-| BD | `src/database.py` | Guarda los templates en `database/database.csv` con columnas `id,template` (los 512 valores separados por `;`) |
+| BD | `src/database.py` | Guarda los templates en `database/database.csv`, columnas `id,template`: cada plantilla cifrada y, al final, un sello del fichero entero |
+| Cifrado | `src/cripto.py` | Rotación secreta de las plantillas (plantilla cancelable), AES-256-GCM por fila y sello HMAC-SHA256. La clave está fuera de la BD, en `clave/bd.key` |
 | Utilidades | `src/utils.py` | Acepta la foto como ruta, bytes o array de NumPy (JPEG, PNG, WebP, AVIF...), y el template como array, lista o texto. Rechaza entradas maliciosas (NaN, infinitos, vectores de ceros, dimensión distinta de 512) |
 
 La clase principal es `BiometricSystem` (`src/biometric_system.py`) y tiene los **9 métodos** que pide el enunciado:
@@ -39,21 +42,22 @@ La clase principal es `BiometricSystem` (`src/biometric_system.py`) y tiene los 
 | Sin detector (`_sd`, la foto va directa al extractor) | `inscribir_sd(id, foto)` | `verificar_sd(id, foto)` | `identificar_sd(foto)` |
 | Sin detector ni extractor (`_t`, se pasa el template) | `inscribir_t(id, t)` | `verificar_t(id, t)` | `identificar_t(t)` |
 
-- `inscribir*` → `True`/`False` (guarda o actualiza la persona en la BD). `inscribir` e `inscribir_sd` aceptan también una **lista de fotos**: se promedian sus templates y se guarda la media, que reconoce mejor otros ángulos y luces. Si alguna foto no es válida, no se inscribe nada.
+- `inscribir*` → `True`/`False`. `inscribir` e `inscribir_sd` aceptan también una **lista de fotos** (máx. 20): se guarda la media de sus templates. Si alguna foto no es válida o no son todas de la misma persona, no se inscribe nada.
 - `verificar*` → `True`/`False` (¿esta foto/template es de la persona `id`?)
 - `identificar*` → `id` o `None` (¿de quién es esta foto/template?)
-- En `_sd` la foto debe ser ya una cara recortada (idealmente alineada, 112x112); si no, se redimensiona tal cual.
-- En `_t` el template es un vector de 512 floats (array de NumPy, lista o texto con los valores separados por `;`). Se normaliza a norma 1 antes de usarlo.
+- En `_sd` la foto debe ser ya una cara recortada y alineada de 112x112 (la que devuelve `detector.detect_and_align`); si no mide eso se redimensiona tal cual. Se rechaza lo que no tiene calidad de cara (imágenes lisas, ruido, muchas fotos sin recortar).
+- En `_t` el template es un vector de 512 floats (array de NumPy, lista o texto con los valores separados por `;`) **de este sistema**: el que da `s.extractor.extract(cara)` o `s.db.get_template(id)`. Uno calculado con otro ArcFace no sirve, porque el extractor aplica una rotación secreta.
 
 > **Ningún método lanza excepciones:** ante datos corruptos o ataques devuelve `False` o `None`.
 
 Defensas de entrada (`src/utils.py`):
 
 - **Templates:** exactamente 512 números finitos; la norma se calcula en float64 para que valores enormes (p. ej. `1e30`) no desborden y acaben guardados como un vector de ceros. Textos y listas demasiado largos se rechazan antes de convertirlos.
-- **Fotos:** máximo 30 MB y 40 megapíxeles, comprobado en la cabecera antes de decodificar (evita las "bombas" de imagen, ficheros de pocos KB que declaran 50000x50000 px). Arrays con NaN, infinitos o tipos no numéricos se rechazan.
-- **Identificadores:** sin caracteres de control (saltos de línea, nulos), máximo 128 caracteres y sin empezar por `=`, `+`, `-` o `@` (inyección de fórmulas al abrir el CSV con Excel).
+- **Fotos:** máximo 30 MB y 40 megapíxeles, comprobado en la cabecera antes de decodificar (evita las "bombas" de imagen). Los arrays se aceptan en uint8, uint16, entero 0-255 o float (0-1 o 0-255); con valores negativos, NaN, mayores que 255 o tipos no numéricos se rechazan. Orden de canales de OpenCV: BGR o BGRA. No se admiten rutas de red.
+- **Identificadores:** sin caracteres de control, máximo 128 caracteres, sin `/` ni `\` y sin empezar por `=`, `+`, `-`, `@` (inyección de fórmulas en Excel) ni `~` (reservado). Al inscribir no puede confundirse con otro (mayúsculas, tildes, separadores, letras cirílicas, `a1ice`...).
+- **Decisión:** umbral, margen frente a las demás personas y, si hay imagen, que el parecido no desaparezca al suavizarla (ruido adversario).
 
-La web (`web/app.py`) añade: solo responde en `localhost`, exige la cabecera `X-CJAR` en las peticiones que cambian datos (otra web abierta en el navegador no puede inscribir ni borrar), envía cabeceras de seguridad (CSP sin scripts en línea, sin iframes), limita el tamaño de las peticiones, no publica la documentación de la API y vuelve a codificar las fotos que guarda (sin metadatos ni contenido oculto). Además: inscribir, borrar, listar personas y ver sus fotos exige la clave de administración; el cálculo pesado no bloquea el servidor y, si hay demasiadas peticiones en cola, responde 503. El contenedor corre sin root, con el sistema de ficheros de solo lectura, sin capacidades y con límites de CPU, memoria y procesos; las dependencias, la imagen base y los modelos (SHA-256) están fijados. La BD falla en modo cerrado si no se puede leer y serializa las escrituras entre procesos.
+La web (`web/app.py`) añade: solo responde en `localhost`, exige la cabecera `X-CJAR` en las peticiones que cambian datos (otra web abierta en el navegador no puede inscribir ni borrar), envía cabeceras de seguridad (CSP sin scripts en línea, sin iframes), limita el tamaño de las peticiones, no publica la documentación de la API y vuelve a codificar las fotos que guarda (sin metadatos ni contenido oculto). Además: inscribir, borrar, listar personas y ver sus fotos exige la clave de administración; el cálculo pesado no bloquea el servidor y, si hay demasiadas peticiones en cola, responde 503. El contenedor corre sin root, con el sistema de ficheros de solo lectura, sin capacidades y con límites de CPU, memoria y procesos; las dependencias, la imagen base y los modelos (SHA-256) están fijados. La BD falla en modo cerrado si no se puede leer o alguien la ha modificado, y serializa las escrituras entre procesos.
 
 > Explicación visual del funcionamiento completo, etapa por etapa: [`docs/workflow.html`](docs/workflow.html) (ábrelo en el navegador).
 
@@ -64,10 +68,12 @@ La web (`web/app.py`) añade: solo responde en `localhost`, exige la cabecera `X
 ├── tests/              Tests de funcionamiento y de ataques
 ├── web/                Interfaz web (FastAPI + página HTML)
 ├── database/
-│   └── database.csv    BD oficial con las personas inscritas
+│   └── database.csv    BD oficial con las personas inscritas (cifrada y sellada)
+├── clave/bd.key        Clave de la BD (ver sección 5)
 ├── docs/               Esquema y explicación visual del pipeline
 ├── main.py             Demo por terminal (usa una BD aparte, no toca la oficial)
 ├── cargar_dataset.py   Regenera la BD a partir de las fotos
+├── admin_bd.py         Verificar, importar, exportar o cambiar la clave de la BD
 ├── requirements.txt    Dependencias de Python
 ├── Dockerfile          Imagen de Docker del sistema
 └── docker-compose.yml  Arranque automático con Docker
@@ -106,7 +112,7 @@ La opción 2 también se puede dejar fija en un fichero `.env` junto al `docker-
 
 **Qué NO se garantiza:** que el log no contenga datos. Pasan tal cual los números enteros y hexadecimales, cualquier texto que no vaya entre comillas (un token, una clave), las **rutas de ficheros** (p. ej. `No existe el archivo de imagen en la ruta: /home/ana/pasaporte.jpg`), el nombre del método, el tipo de excepción y los ids de las personas. Unas comillas mezcladas dentro de un mismo texto (`ab'cd"ef`) pueden dejar pasar un fragmento. La clave de administración no llega al logging por ningún camino que se conozca, pero `limpiar()` no la censura. Las fotos y las plantillas no se registran como tales, solo el mensaje de la excepción. Si vas a compartir un log, revísalo antes.
 
-Al leer `database.csv` se registra un resumen por cada **cambio real** del fichero (no por petición): filas válidas y descartadas, ids duplicados (gana la última fila) y, si el número de personas baja respecto a la lectura anterior, un aviso de posible truncado o borrado. Es un `INFO` si todo está bien y un `WARNING` si hay filas descartadas, duplicados o una bajada.
+Al leer `database.csv` se registra una línea por cada **cambio real** del fichero (no por petición): `INFO` si está íntegro, con el número de personas, o `WARNING … RECHAZADA` con el motivo si no.
 
 ### Interfaz web
 
@@ -128,7 +134,7 @@ CJAR_ADMIN_TOKEN=una-clave-larga-y-secreta docker compose up --build
 
 Si no se define (o es demasiado corta), el servidor genera una al arrancar (`secrets.token_urlsafe(24)`, 192 bits) y la muestra en el log del contenedor: `docker compose logs cjar` (línea «Clave de administración de CJAR»), **donde queda escrita en claro** para cualquiera que pueda leer ese log. **Esa clave cambia en cada arranque.** Si no quieres que quede en el log, define `CJAR_ADMIN_TOKEN` tú mismo. Se pega en el campo «Clave de administración» de la web (se guarda solo en esa pestaña del navegador). Sin ella se puede verificar, identificar y comparar, pero no inscribir, borrar ni listar personas ni ver sus fotos.
 
-**Por seguridad, verificar e identificar no devuelven la similitud ni un ranking**: con esa cifra un atacante podría ir retocando una imagen hasta parecerse a alguien (*hill-climbing*). Un id que no existe responde igual que uno que no coincide. Inscribir un id que ya existe pide confirmación antes de sustituirlo. Si una inscripción haría superar los topes de la BD (100.000 filas o 64 MB, los mismos que rechaza la lectura), no se escribe nada: la biblioteca devuelve `False` (con un aviso en el log) y la web responde **507**, distinto del 409 de «ya inscrito».
+**Por seguridad, verificar e identificar no devuelven la similitud ni un ranking**: con esa cifra un atacante podría ir retocando una imagen hasta parecerse a alguien (*hill-climbing*). Un id que no existe responde igual que uno que no coincide. Inscribir un id que ya existe, o a alguien que se parece a otra persona inscrita, pide confirmación.
 
 **¿En qué se parecen?** En Comparar, y en Verificar e Identificar cuando hay coincidencia, aparece además un desglose por zonas de la cara (frente, ojos, nariz, mejillas, boca, mentón) y un mapa de calor. Como los 512 valores de ArcFace no se pueden interpretar uno a uno, se usa *análisis por oclusión* (`src/explicador.py`): se tapa cada zona, se vuelve a extraer el template y se mide la similitud de nuevo. Lo que se pierde es el aporte de esa zona: positivo (verde) = se parecen ahí; negativo (rojo) = esa zona los diferencia. Si hay foto de las dos personas se hace en los dos sentidos y se promedia. Añade ~1-2 s por petición en CPU.
 
@@ -161,13 +167,27 @@ False
 True
 ```
 
-`False` significa también cualquier otro fallo (foto sin cara, id no válido...): el motivo queda en el log (ver «Avisos en el log»). `cargar_dataset.py` usa `reemplazar=True` porque recargar el dataset es decisión del operador.
+**Tampoco inscriben a quien ya está con otro id.** Si la cara se parece a la de otra persona (similitud ≥ 0,40) o el id se confunde con otro, devuelven `False`. La excepción es para gemelos y la decide el operador:
+
+```python
+>>> s.inscribir("anita", "fotos/ana3.jpg")                          # es ana con otro nombre
+False
+>>> s.inscribir("eva", "fotos/eva.jpg", permitir_parecido=True)     # gemela de ana, comprobado por otro medio
+True
+>>> s.registrar_contraste("ana", "fotos/eva.jpg")                   # o sin inscribirla: solo para no confundirlas
+True
+```
+
+Un *contraste* no es una identidad: solo compite. Una foto que se parezca más (o casi igual) al contraste no se acepta como `ana`. La BD trae dos (los gemelos de `james_phelps_(gemelo_weasley)` y `mary-kate_olsen`); se quitan con `python admin_bd.py quitar-contrastes ID`.
+
+`False` significa también cualquier otro fallo (foto sin cara, id no válido...): el motivo queda en el log. `cargar_dataset.py` usa `reemplazar=True` porque recargar el dataset es decisión del operador.
 
 Otros comandos útiles:
 
 ```bash
 docker compose run --rm cjar python main.py                              # demo por terminal
-docker compose run --rm cjar python -m unittest tests.test_system -v     # tests de la librería
+docker compose run --rm cjar python admin_bd.py verificar                # ¿está íntegra la BD?
+docker compose run --rm cjar python -m unittest tests.test_system tests.test_bd tests.test_imagen   # tests de la librería
 docker compose build                                                     # tras cambiar requirements.txt
 ```
 
@@ -176,10 +196,10 @@ docker compose build                                                     # tras 
 ```bash
 docker build --build-arg INSTALL_DEV=1 -t cjar-biometria:test .
 docker run --rm --network none cjar-biometria:test \
-    python -m unittest tests.test_system tests.test_web tests.test_avisos tests.test_despliegue -v
+    python -m unittest tests.test_system tests.test_bd tests.test_imagen tests.test_web tests.test_avisos tests.test_despliegue
 ```
 
-**Los tests no tocan tus datos** (usan directorios temporales; comprobado sembrando `database/` y `fotos/` con ficheros «reales»: la suite no cambia ninguno). Una sola cosa queda: al importarse, `web/app.py` abre `database/database.csv` (y lo crea con la cabecera si falta) y crea `fotos/` si no existe. Por eso lanza la suite con el `docker run` de arriba (no monta nada) y **no con `docker compose run`, que monta tu `database/` y tu `fotos/`**, salvo que sean copias.
+**Los tests no tocan tus datos** (usan directorios temporales; comprobado sembrando `database/` y `fotos/` con ficheros «reales»: la suite no cambia ninguno). Una sola cosa queda: al importarse, `web/app.py` crea `fotos/` si no existe. Por eso lanza la suite con el `docker run` de arriba (no monta nada) y **no con `docker compose run`, que monta tu `database/` y tu `fotos/`**, salvo que sean copias.
 
 ## 4. Cómo ejecutarlo sin Docker
 
@@ -198,30 +218,24 @@ La primera ejecución descarga los modelos en `~/.insightface`.
 
 ## 5. Base de datos
 
-`database/database.csv` contiene las personas inscritas con el sistema completo (detector + extractor):
+`database/database.csv` contiene las personas inscritas con el sistema completo (detector + extractor): **50**.
 
-- Las personas del dataset común proporcionado por el docente, una foto cada una. El id es el nombre del fichero sin el año (`christian_bale_2012.jpg` → `christian_bale`).
-- La persona elegida por el equipo: **`salman_rushdie`**, inscrito con la media de 3 fotos.
+- Las **49** del dataset del docente, una foto cada una (`Dataset.tar.gz` trae 49 fotos, no las 50 del enunciado). El id es el nombre del fichero sin el año (`christian_bale_2012.jpg` → `christian_bale`).
+- La elegida por el equipo: **`salman_rushdie`**, con la media de 3 fotos.
 
-Las fotos **no** se suben al repositorio (`fotos/` está en `.gitignore`), solo los templates. Para regenerar la BD desde las fotos:
+Formato: `id,template` en cada fila, con la plantilla cifrada (`cjar1:` y base64 de nonce + AES-256-GCM, con el id autenticado), y una última fila `__sello__` con un HMAC-SHA256 de todo lo anterior. Las filas `~id~n` son contrastes. Las fotos no se suben al repositorio.
+
+**Clave.** `clave/bd.key` (64 caracteres hexadecimales), o las variables `CJAR_CLAVE_BD` / `CJAR_CLAVE_BD_FICHERO`. Va en el repositorio **solo para que el sistema funcione nada más clonarlo** en el intercambio entre grupos; en un despliegue real se guardaría aparte. Para cambiarla: `python admin_bd.py rotar clave_nueva.key` (vuelve a cifrar la BD y deja inservibles las plantillas anteriores).
+
+**Si se edita el CSV a mano** (también al abrirlo y guardarlo con Excel) el sello no coincide: el sistema lo rechaza entero, lo dice en el log y no reconoce ni inscribe a nadie. Para recuperarlo: `git checkout database/database.csv`.
+
+Para regenerar la BD desde las fotos:
 
 ```bash
 # fotos del docente en fotos/Dataset/, fotos de la persona extra en fotos/salman_rushdie/
 docker compose run --rm cjar python cargar_dataset.py --extra salman_rushdie fotos/salman_rushdie/salman_rushdie_1.jpg fotos/salman_rushdie/salman_rushdie_2.jpg fotos/salman_rushdie/salman_rushdie_3.jpg
 ```
 
-Si una persona ya existe, `inscribir` (y `inscribir_sd`, `inscribir_t`) **no** la sustituye y devuelve `False`, salvo que se llame con `reemplazar=True` (`cargar_dataset.py` lo hace, porque recargar el dataset es decisión del operador). Los tests y `main.py` trabajan sobre BDs temporales y no modifican la oficial.
-
 ## 6. Limitaciones conocidas
 
-Lo que **no se puede resolver** con lo que exige el enunciado (la BD es legible por el grupo rival y los métodos `_t` reciben la plantilla tal cual). Las pruebas se hicieron con la BD oficial (50 personas) y el umbral 0,48.
-
-**a) Con el CSV público, `verificar_t` e `identificar_t` aceptan la plantilla robada.** `verificar_t('adam_pearson', <su fila del CSV>)` devuelve `True` e `identificar_t` devuelve su id. Es inherente al enunciado: la BD es legible por el grupo rival y los métodos `_t` reciben la plantilla tal cual. La web nunca acepta plantillas. Las plantillas manipuladas (NaN, infinitos, ceros, dimensión errónea, tipos raros) se rechazan; una con valores enormes como 1e30 se normaliza, pero no coincide con nadie.
-
-**b) `verificar_sd` acepta entradas sintéticas.** Una búsqueda evolutiva ingenua, con acceso al extractor y a la plantilla pública (sin ninguna foto de la víctima), llegó a **0,482 de similitud con el umbral en 0,48** tras 5.792 evaluaciones del extractor en unos 7 minutos (421 s, 2 CPU), con una imagen que **no es una cara** (un patrón de manchas de colores); `verificar_sd` la aceptó y el flujo completo con detector la rechazó. No se probó una búsqueda con gradientes del modelo ni una que genere una cara realista, así que no se sabe cuánto más lejos llegaría. No hay detección de vivacidad: con una foto pública de la víctima, `verificar` y `verificar_sd` la aceptan. En cambio, 300 imágenes de ruido aleatorio no superaron 0,256 contra ninguna de las 50 plantillas, y la similitud máxima entre dos personas distintas de la BD oficial es 0,355.
-
-**c) Editar el CSV a mano no se detecta con firma.** Añadir una fila nueva, sustituir en el sitio la plantilla de otra persona, duplicar un id (gana la última fila; la víctima deja de verificarse), truncar el fichero (con la mitad de los bytes quedaban 25 de 50 personas) o borrarlo (la BD queda vacía) no lo impide ni lo detecta ninguna firma. Con los avisos del log al menos queda constancia de algunos casos: filas descartadas, ids duplicados y la bajada del número de personas (truncado o borrado). **Añadir o sustituir una identidad bien formada, sin duplicar el id, no produce ningún aviso.**
-
-**d) `_sd` espera una cara ya alineada de 112×112.** Con la foto completa sin alinear, `verificar_sd` da `False` incluso para la propia persona (similitud 0,265 de `adam_pearson` consigo mismo). Para usar `_sd` hay que pasar la cara que devuelve `detector.detect_and_align`.
-
-
+En [`INFORME.md`](INFORME.md), con la forma de reproducir cada una.

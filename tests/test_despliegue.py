@@ -39,7 +39,25 @@ class TestDespliegue(unittest.TestCase):
                 linea = linea.split("#")[0].strip()
                 if linea and not linea.startswith("-c "):
                     self.assertRegex(linea, r"^[A-Za-z0-9_.\-\[\]]+==[0-9][\w.]*$", f"{fichero}: {linea}")
-        self.assertIn("-c requirements.lock", leer("Dockerfile"))
+        self.assertIn("--require-hashes", leer("Dockerfile"))
+        self.assertIn("--no-deps", leer("Dockerfile"))
+        for fichero in ("requirements-hash.txt", "requirements-dev-hash.txt"):
+            paquetes = re.findall(r"(?m)^([a-z][a-z0-9-]*)==", leer(fichero))
+            self.assertGreater(len(paquetes), 30)
+            self.assertNotIn("opencv-python", paquetes)  # el build con Qt: solo el headless
+            self.assertGreaterEqual(leer(fichero).count("--hash=sha256:"), len(paquetes))
+
+    def test_clave_de_la_bd_fuera_de_la_imagen_y_de_la_bd(self):
+        self.assertIn("./clave:/app/clave:ro", leer("docker-compose.yml"))
+        self.assertIn("clave/", reglas_de(".dockerignore"))
+        self.assertNotIn("COPY clave", leer("Dockerfile"))
+        self.assertIn("database/database.csv -text", leer(".gitattributes"))
+
+    def test_opencv_sin_interfaz_grafica(self):
+        import cv2
+        if not Path("/.dockerenv").exists():
+            self.skipTest("solo en la imagen")
+        self.assertNotIn("QT", re.search(r"GUI:.*", cv2.getBuildInformation()).group(0))
 
     def test_modelos_verificados(self):
         script = leer("docker/descargar_modelos.py")
@@ -69,6 +87,7 @@ class TestDespliegue(unittest.TestCase):
         dockerfile = leer("Dockerfile")
         self.assertNotRegex(dockerfile, r"(?m)^COPY\s+\.\s+\.\s*$")
         permitido = {"requirements.txt", "requirements.lock", "requirements-dev.txt", "docker/descargar_modelos.py",
+                     "requirements-hash.txt", "requirements-dev-hash.txt", "admin_bd.py", ".gitattributes",
                      "src", "web", "tests", "docker", "main.py", "cargar_dataset.py", "Dockerfile",
                      "docker-compose.yml", ".gitignore", ".dockerignore"}
         origenes = []
@@ -77,7 +96,7 @@ class TestDespliegue(unittest.TestCase):
         self.assertTrue(origenes)
         for origen in origenes:
             self.assertIn(origen, permitido, f"COPY de algo no previsto: {origen}")
-        for prohibido in (".env", "fotos", "database"):
+        for prohibido in (".env", "fotos", "database", "clave"):
             self.assertNotIn(prohibido, origenes)
 
     def test_rotacion_de_logs(self):

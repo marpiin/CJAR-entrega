@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import src  # noqa: F401  (antes que cv2: fija el límite de píxeles de OpenCV, que se lee al importarlo)
 import cv2
 import numpy as np
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -39,10 +40,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from src.biometric_system import BiometricSystem
-from src.database import DatabaseReadError
+from src.database import DatabaseReadError, InscripcionRechazada
 from src.explicador import Explicador
+from src.extractor import NORMA_INSCRIPCION, NORMA_MINIMA
 from src.registro import avisar_si_no_escribible, configurar_para_servidor, fallo
-from src.utils import average_templates, parse_input_id, parse_input_image
+from src.utils import parse_input_id, parse_input_image
 
 STATIC_DIR = Path(__file__).parent / "static"
 configurar_para_servidor()  # los avisos del logger "cjar" salen en el log del contenedor, con formato
@@ -54,9 +56,10 @@ except OSError:
 avisar_si_no_escribible(str(FOTOS_DIR), "guardar las fotos de inscripción")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_FOTOS = 10
-# Peticiones pesadas admitidas a la vez (una trabajando y el resto esperando el lock);
-# las demás reciben 503 en vez de acumular memoria y hilos
-MAX_EN_COLA = 4
+# Peticiones pesadas admitidas a la vez (una trabajando y el resto esperando el lock); las demás reciben 503 en
+# vez de acumular memoria y hilos. El administrador tiene sus plazas aparte y comparar (dos fotos), solo una
+MAX_EN_COLA = 12
+MAX_EN_COLA_ADMIN = 4
 MAX_BODY_BYTES = MAX_FOTOS * MAX_UPLOAD_BYTES + 1024 * 1024
 # Lo que realmente necesita cada ruta anónima: una foto (verificar/identificar) o dos (comparar)
 LIMITE_RUTA = {
@@ -75,16 +78,16 @@ PRESUPUESTO_ADMIN = MAX_BODY_BYTES + 4 * MIB
 FOTO_MAX_LADO = 800  # las fotos guardadas solo se usan como miniatura y para el cotejo
 ID_PATTERN = re.compile(r"\w[\w()\-. ]{0,63}")
 ADMIN_TOKEN = os.environ.get("CJAR_ADMIN_TOKEN", "").strip()
-if len(ADMIN_TOKEN) < 16:
+if len(ADMIN_TOKEN) < 16 or len(set(ADMIN_TOKEN)) < 8 or not ADMIN_TOKEN.isascii():
     if ADMIN_TOKEN:
-        print("CJAR_ADMIN_TOKEN es demasiado corta (mín. 16 caracteres): se genera otra.", file=sys.stderr)
+        print("CJAR_ADMIN_TOKEN no vale (mín. 16 caracteres ASCII, al menos 8 distintos): se genera otra.", file=sys.stderr)
     ADMIN_TOKEN = secrets.token_urlsafe(24)
     print(f"Clave de administración de CJAR (inscribir/borrar): {ADMIN_TOKEN}", file=sys.stderr, flush=True)
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("CJAR_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 
 CSP = (
     "default-src 'self'; script-src 'self'; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+    "style-src 'self' 'unsafe-inline'; font-src 'self'; "
     "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; "
     "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
@@ -120,22 +123,30 @@ class PresupuestoCuerpos:
 cuerpos = PresupuestoCuerpos(PRESUPUESTO_ANONIMO, PRESUPUESTO_ADMIN)
 
 app = FastAPI(title="CJAR", docs_url=None, redoc_url=None, openapi_url=None)
-system = BiometricSystem(db_path="database/database.csv")
+# crear_bd=False: si falta el CSV se responde 503; nunca se sustituye por una BD vacía
+system = BiometricSystem(db_path="database/database.csv", crear_bd=False)
 explicador = Explicador(system.extractor)
 # El CSV y los modelos no están pensados para accesos concurrentes
 lock = threading.Lock()
 cola = threading.BoundedSemaphore(MAX_EN_COLA)
+cola_admin = threading.BoundedSemaphore(MAX_EN_COLA_ADMIN)
+comparando = threading.BoundedSemaphore(1)
+# La explicación cuesta unas 40 veces más que la decisión: solo para el administrador, fuera del lock y de la
+# cola, y de una en una (si hay otra en marcha se omite). Antes unas pocas peticiones anónimas a comparar
+# dejaban al resto en 503
+explicando = threading.BoundedSemaphore(1)
 
 
 @contextmanager
-def turno():
+def turno(request: Request, plazas: Optional[threading.BoundedSemaphore] = None):
     """Plaza en la cola de trabajo pesado, o 503 si está llena."""
-    if not cola.acquire(blocking=False):
+    plazas = cola_admin if _es_admin(request) else (plazas or cola)
+    if not plazas.acquire(blocking=False):
         raise HTTPException(503, "El servidor está ocupado. Inténtalo de nuevo en unos segundos.")
     try:
         yield
     finally:
-        cola.release()
+        plazas.release()
 
 
 @app.middleware("http")
@@ -215,14 +226,14 @@ def _modo(modo: str, decision: bool = False) -> str:
     return modo
 
 
-def _cara(data: bytes, modo: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Obtiene el template y la imagen 112x112 que entra al extractor."""
+def _cara(data: bytes, modo: str, unica: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    """Obtiene el template y la imagen 112x112 que entra al extractor (unica: solo una cara, al inscribir)."""
     try:
         if modo == "sd":
             face = cv2.resize(parse_input_image(data), (112, 112), interpolation=cv2.INTER_AREA)
         else:
-            face = system.detector.detect_and_align(data)
-        return system.extractor.extract(face), face
+            face = system.detector.detect_and_align(data, unica=unica)
+        return system.extractor.extract(face, NORMA_INSCRIPCION if unica else NORMA_MINIMA), face
     except ValueError as err:
         raise HTTPException(422, str(err))
     except Exception as exc:
@@ -232,8 +243,8 @@ def _cara(data: bytes, modo: str) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _template(data: bytes, modo: str) -> Tuple[np.ndarray, str]:
-    """Como _cara, pero con la cara ya codificada para mostrarla en la web."""
-    t, face = _cara(data, modo)
+    """Como _cara (para inscribir), pero con la cara ya codificada para mostrarla en la web."""
+    t, face = _cara(data, modo, unica=True)
     return t, _to_data_url(face)
 
 
@@ -274,7 +285,7 @@ def _guardar_foto_o_avisar(id: str, data: bytes, existia: bool) -> bool:
     try:
         _guardar_foto(id, data)
         return True
-    except OSError as exc:
+    except Exception as exc:
         fallo("web._guardar_foto", exc)
         if existia:
             try:
@@ -295,28 +306,25 @@ def _cara_inscrita(id: str, modo: str) -> Optional[np.ndarray]:
         return None
 
 
-def _explicacion(cara_a: np.ndarray, t_b: np.ndarray,
+def _explicacion(request: Request, cara_a: np.ndarray, t_b: np.ndarray,
                  cara_b: Optional[np.ndarray] = None, t_a: Optional[np.ndarray] = None) -> Optional[dict]:
-    """Zonas de la cara en las que se apoya la similitud (ver src/explicador.py)."""
+    """
+    Zonas de la cara en las que se apoya la similitud (ver src/explicador.py). None para quien no es
+    administrador (es cara y sale en parte de la foto inscrita) o si ya hay otra en marcha.
+    """
+    if not _es_admin(request) or not explicando.acquire(blocking=False):
+        return None
     try:
         r = explicador.explicar(cara_a, t_b, cara_b, t_a)
     except Exception as exc:
         fallo("web._explicacion", exc, limitar=True)
         return None  # la explicación es un extra: si falla, el resultado se muestra igual
+    finally:
+        explicando.release()
     return {
         "regiones": r["regiones"],
         "mapas": [_to_data_url(m) if m is not None else None for m in r["mapas"]],
     }
-
-
-def _sin_foto_inscrita(explicacion: Optional[dict], request: Request) -> Optional[dict]:
-    """
-    El mapa de la segunda cara es la foto guardada de la persona inscrita, que solo ve el
-    administrador (/fotos): a quien no lo es se le quita, también si acaba de coincidir.
-    """
-    if explicacion and not _es_admin(request):
-        explicacion = {**explicacion, "mapas": [explicacion["mapas"][0], None]}
-    return explicacion
 
 
 def _clean_id(id: str, nuevo: bool = False) -> str:
@@ -381,8 +389,11 @@ def borrar(id: str):
         if not system.db.delete_template(clean_id):
             raise HTTPException(404, "Esa persona no está inscrita.")
     foto_path = _foto_path(clean_id)
-    if foto_path.is_file():
-        foto_path.unlink()
+    try:
+        foto_path.unlink(missing_ok=True)
+    except OSError as exc:
+        fallo("web.borrar", exc)  # la plantilla ya está borrada; la foto no se usa sin ella
+        return {"ok": True, "foto_borrada": False}
     return {"ok": True}
 
 
@@ -400,23 +411,24 @@ def get_foto(filename: str):
 
 
 @app.post("/api/inscribir", dependencies=[Depends(admin)])
-def inscribir(id: str = Form(...), fotos: List[UploadFile] = File(...), modo: str = Form("completo"),
-                    reemplazar: bool = Form(False)):
+def inscribir(request: Request, id: str = Form(...), fotos: List[UploadFile] = File(...), modo: str = Form("completo"),
+                    reemplazar: bool = Form(False), permitir_parecido: bool = Form(False)):
     """
-    Inscribe con una o varias fotos: el template guardado es la media de todas. Si el id
-    ya existe responde 409, salvo que se pida reemplazar=true.
+    Inscribe con una o varias fotos: el template guardado es la media de todas. Si el id ya existe
+    responde 409 (motivo "existe"), salvo reemplazar=true; si la persona se parece a otra inscrita, 409
+    (motivo "parecido"), salvo permitir_parecido=true (gemelos).
     """
     clean_id = _clean_id(id, nuevo=True)
     modo = _modo(modo)
     if len(fotos) > MAX_FOTOS:
         raise HTTPException(422, f"Como máximo {MAX_FOTOS} fotos por inscripción.")
-    with turno():
+    with turno(request):
         datos = [_read_upload(f) for f in fotos]  # en memoria solo dentro de la cola
         with lock:
-            return _inscribir(clean_id, datos, modo, reemplazar)
+            return _inscribir(clean_id, datos, modo, reemplazar, permitir_parecido)
 
 
-def _inscribir(clean_id: str, datos: List[bytes], modo: str, reemplazar: bool) -> dict:
+def _inscribir(clean_id: str, datos: List[bytes], modo: str, reemplazar: bool, permitir_parecido: bool = False) -> dict:
     templates, caras = [], []
     for i, data in enumerate(datos, 1):
         try:
@@ -425,20 +437,20 @@ def _inscribir(clean_id: str, datos: List[bytes], modo: str, reemplazar: bool) -
             raise HTTPException(err.status_code, f"Foto {i}: {err.detail}")
         templates.append(t)
         caras.append(c)
-    media = average_templates(templates)
-    existia = system.db.get_template(clean_id) is not None
-    if not system.db.save_template(clean_id, media, reemplazar=reemplazar):
+    existia = system.db.existe(clean_id)
+    try:
+        guardado = system.guardar(clean_id, templates, reemplazar, permitir_parecido)
+    except InscripcionRechazada as err:
+        raise HTTPException(409, {"motivo": "parecido", "texto": f"No se ha inscrito: {err}."})
+    except ValueError as err:
+        raise HTTPException(422, str(err))
+    if not guardado:
         if system.db.existe(clean_id) and not reemplazar:
-            raise HTTPException(409, f"«{clean_id}» ya está inscrito. Confirma si quieres sustituirlo.")
+            raise HTTPException(409, {"motivo": "existe", "texto": f"«{clean_id}» ya está inscrito. Confirma si quieres sustituirlo."})
         # save_template también devuelve False si la BD llegaría a sus topes de filas o de tamaño (queda un WARNING en el log)
         raise HTTPException(507, "La base de datos ha alcanzado su tamaño máximo: no se ha inscrito a nadie.")
     foto_guardada = _guardar_foto_o_avisar(clean_id, datos[0], existia)
-    # Cada foto contra la media de las demás (se lee como una verificación):
-    # si no llega al umbral suele ser una foto mala o de otra persona
-    coherencia = [
-        system.matcher.compute_similarity(t, average_templates(templates[:i] + templates[i + 1:]))
-        for i, t in enumerate(templates)
-    ] if len(templates) > 1 else []
+    coherencia = system.coherencia(templates)  # cada foto contra la media de las demás
     return {
         "ok": True, "id": clean_id, "actualizado": existia, "foto_guardada": foto_guardada, "caras": caras,
         "coherencia": coherencia, "umbral": system.matcher.threshold,
@@ -459,15 +471,15 @@ def verificar(
     """
     clean_id = _clean_id(id)
     modo = _modo(modo, decision=True)
-    with turno(), lock:
+    with turno(request), lock:
         data = _read_upload(foto)
         template, face = _cara(data, modo)
-        enrolled = system.db.get_template(clean_id)
-        match = enrolled is not None and system.matcher.verify_one_to_one(template, enrolled)[0]
-        # La explicación compara con la plantilla guardada: solo se da si ya hay coincidencia
-        explicacion = _explicacion(face, enrolled, _cara_inscrita(clean_id, modo), template) if match else None
+        match = system.decidir(clean_id, template, face)
+        inscrito = system.db.get_template(clean_id)
+    # La explicación compara con la plantilla guardada: solo se da si ya hay coincidencia
+    explicacion = _explicacion(request, face, inscrito, _cara_inscrita(clean_id, modo), template) if match else None
     return {"match": match, "umbral": system.matcher.threshold, "cara": _to_data_url(face),
-            "explicacion": _sin_foto_inscrita(explicacion, request)}
+            "explicacion": explicacion}
 
 
 @app.post("/api/identificar")
@@ -478,30 +490,31 @@ def identificar(
 ):
     """Solo devuelve el id si alguien supera el umbral; ni ranking ni similitudes."""
     modo = _modo(modo, decision=True)
-    with turno(), lock:
+    with turno(request), lock:
         data = _read_upload(foto)
         template, face = _cara(data, modo)
-        todos = system.db.get_all()
-        mejor, _ = system.matcher.identify_one_to_many(template, todos)
-        explicacion = _explicacion(face, todos[mejor], _cara_inscrita(mejor, modo), template) if mejor else None
+        mejor = system.buscar(template, face)
+        inscrito = system.db.get_template(mejor) if mejor else None
+    explicacion = _explicacion(request, face, inscrito, _cara_inscrita(mejor, modo), template) if mejor else None
     return {"id": mejor, "umbral": system.matcher.threshold, "cara": _to_data_url(face),
-            "explicacion": _sin_foto_inscrita(explicacion, request)}
+            "explicacion": explicacion}
 
 
 @app.post("/api/comparar")
 def comparar(
+    request: Request,
     foto1: UploadFile = File(...),
     foto2: UploadFile = File(...),
     modo: str = Form("completo"),
 ):
     modo = _modo(modo)
     th = system.matcher.threshold  # el umbral solo lo decide el servidor
-    with turno(), lock:
+    with turno(request, comparando), lock:
         d1, d2 = _read_upload(foto1), _read_upload(foto2)
         t1, f1 = _cara(d1, modo)
         t2, f2 = _cara(d2, modo)
         score = system.matcher.compute_similarity(t1, t2)
-        explicacion = _explicacion(f1, t2, f2, t1)
+    explicacion = _explicacion(request, f1, t2, f2, t1)
     return {
         "match": score >= th, "score": score, "umbral": th,
         "caras": [_to_data_url(f1), _to_data_url(f2)], "explicacion": explicacion,

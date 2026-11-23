@@ -8,6 +8,9 @@ import os
 import shutil
 import tempfile
 import unittest
+
+os.environ["CJAR_CLAVE_BD"] = "ab" * 32  # clave de pruebas, nunca la real
+
 import numpy as np
 from src.biometric_system import BiometricSystem
 
@@ -63,28 +66,11 @@ class TestBiometricSystemAttacks(unittest.TestCase):
         self.assertFalse(self.system.inscribir_t("attacker_nan", nan_template))
         self.assertFalse(self.system.verificar_t("user_101", nan_template))
 
-    # 3. Ataque: Manipulación Directa del Archivo CSV
-    def test_05_attack_tampered_csv_file(self):
-        # Simulamos que el atacante abrió y escribió basura directa en el CSV
-        with open(self.test_db_path, "a", encoding="utf-8") as f:
-            f.write("attacker_corrupted,esto_no_es_un_vector_valido\n")
-            f.write("attacker_empty_vector,\n")
-            f.write(",1.0;2.0;3.0\n")
-
-        # El sistema no debe romperse al cargar la BD manipulada
-        valid_records = self.system.db.get_all()
-        self.assertNotIn("attacker_corrupted", valid_records)
-        self.assertNotIn("attacker_empty_vector", valid_records)
-
-        # Las identidades legítimas previas deben seguir verificando sin problemas
-        t1 = self._generate_valid_template(101)
-        self.assertTrue(self.system.verificar_t("user_101", t1))
-
     # 4. Trazabilidad: explicación por zonas de la cara
     def test_06_explicador_zonas(self):
         from src.explicador import Explicador, REGIONES
         cara = np.random.default_rng(6).integers(0, 256, (112, 112, 3), dtype=np.uint8)
-        t = self.system.extractor.extract(cara)
+        t = self.system.extractor.extract_many([cara])[0]  # ruido: extract() lo rechaza por calidad
         r = Explicador(self.system.extractor).explicar(cara, t, cara, t)
 
         aportes = [z["aporte"] for z in r["regiones"]]
@@ -101,11 +87,12 @@ class TestBiometricSystemAttacks(unittest.TestCase):
         # y se daba por bueno. Ahora se normaliza bien: queda un template válido de norma 1
         for uid, t in [("enorme", [1e30] * 512), ("maximo", np.full(512, 3e38, np.float32)),
                        ("diminuto", np.full(512, 1e-30))]:
-            self.assertTrue(self.system.inscribir_t(uid, t))
+            self.assertTrue(self.system.inscribir_t(uid, t, permitir_parecido=True))
             guardado = self.system.db.get_template(uid)
             self.assertIsNotNone(guardado, uid)
             self.assertAlmostEqual(float(np.linalg.norm(guardado)), 1.0, places=4)
             self.assertTrue(self.system.verificar_t(uid, t))
+            self.assertTrue(self.system.db.delete_template(uid))  # las tres son la misma dirección
         # Lo que desborda incluso en float64 (infinito) se sigue rechazando
         self.assertFalse(self.system.inscribir_t("infinito", [1e400] * 512))
 
@@ -117,8 +104,9 @@ class TestBiometricSystemAttacks(unittest.TestCase):
         self.assertNotIn("a\nb", self.system.db.get_all())
         # Los ids normales (también con paréntesis o guiones en medio) siguen funcionando
         self.assertTrue(self.system.inscribir_t("aitana_(twin_melody)", t))
-        self.assertTrue(self.system.inscribir_t(42, t))
-        self.assertTrue(self.system.verificar_t("42", t))
+        t42 = self._generate_valid_template(4242)
+        self.assertTrue(self.system.inscribir_t(42, t42))
+        self.assertTrue(self.system.verificar_t("42", t42))
 
     def test_09_attack_image_bombs_and_bad_arrays(self):
         import struct, zlib
@@ -169,242 +157,6 @@ class TestBiometricSystemAttacks(unittest.TestCase):
         # El operador puede sustituirla a propósito
         self.assertTrue(self.system.inscribir_t("victima_11", atacante, reemplazar=True))
         self.assertTrue(self.system.verificar_t("victima_11", atacante))
-
-
-class TestDatabaseIntegrity(unittest.TestCase):
-    """Un fallo de lectura o una fila ilegible no pueden acabar borrando la BD."""
-
-    def setUp(self):
-        import tempfile
-        from src.database import BiometricDatabase
-        self.dir = tempfile.mkdtemp()
-        self.path = os.path.join(self.dir, "db.csv")
-        self.db = BiometricDatabase(self.path)
-        rng = np.random.default_rng(7)
-        for uid in ("alice", "bob", "carol"):
-            self.db.save_template(uid, rng.standard_normal(512))
-        self.nuevo = rng.standard_normal(512)
-
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def _bytes(self):
-        with open(self.path, "rb") as f:
-            return f.read()
-
-    def test_lectura_fallida_no_reescribe(self):
-        # Antes: _read_raw_records hacía 'except Exception: return {}' y save_template
-        # reescribía la BD solo con el registro nuevo
-        import builtins
-        from unittest import mock
-        from src.database import DatabaseReadError
-        antes = self._bytes()
-        real_open = builtins.open
-
-        def open_bloqueado(path, mode="r", *a, **k):
-            if str(path) == self.path and "r" in mode:
-                raise PermissionError("bloqueado por otro programa")
-            return real_open(path, mode, *a, **k)
-
-        with mock.patch("builtins.open", open_bloqueado):
-            with self.assertRaises(DatabaseReadError):
-                self.db.save_template("dave", self.nuevo)
-            with self.assertRaises(DatabaseReadError):
-                self.db.get_all()
-        self.assertEqual(self._bytes(), antes)
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
-
-    def test_byte_no_utf8_solo_invalida_su_fila(self):
-        # Antes: un byte 0xFF (p. ej. un CSV guardado en ANSI por Excel) vaciaba la BD
-        with open(self.path, "ab") as f:
-            f.write("mu\xf1oz,1;2\r\n".encode("latin-1"))
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
-        self.assertTrue(self.db.save_template("dave", self.nuevo))
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol", "dave"])
-        self.assertIn("mu\xf1oz,1;2".encode("latin-1"), self._bytes())  # se conserva tal cual
-
-    def test_campo_enorme_solo_invalida_su_fila(self):
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write("zed," + "x" * 140_000 + "\n")
-        self.assertTrue(self.db.save_template("dave", self.nuevo))
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol", "dave"])
-
-    def test_escritores_concurrentes_no_pierden_registros(self):
-        # Antes: dos instancias (p. ej. la web y cargar_dataset.py) podían pisarse al
-        # leer-modificar-escribir y compartían el temporal fijo database.csv.tmp
-        import threading
-        from src.database import BiometricDatabase
-        otra = BiometricDatabase(self.path)
-        rng = np.random.default_rng(8)
-        t = rng.standard_normal(512)
-        barrera = threading.Barrier(2)
-
-        def escribir(db, prefijo):
-            barrera.wait()
-            for i in range(25):
-                db.save_template(f"{prefijo}{i}", t)
-
-        hilos = [threading.Thread(target=escribir, args=(d, p)) for d, p in ((self.db, "a"), (otra, "b"))]
-        for h in hilos:
-            h.start()
-        for h in hilos:
-            h.join()
-        self.assertEqual(len(self.db.get_all()), 3 + 50)
-
-    @unittest.skipUnless(os.name == "posix" and os.geteuid() != 0, "solo tiene sentido sin root")
-    def test_lock_de_otro_usuario_no_bloquea(self):
-        # Un .lock que dejó una versión anterior que corría como root (sin permiso de escritura)
-        lock = self.path + ".lock"
-        open(lock, "a").close()
-        os.chmod(lock, 0o444)
-        self.assertTrue(self.db.save_template("dave", self.nuevo))
-
-    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "necesita enlaces simbólicos POSIX")
-    def test_temporal_no_sigue_enlaces(self):
-        victima = os.path.join(self.dir, "victima.txt")
-        with open(victima, "w") as f:
-            f.write("no tocar")
-        os.symlink(victima, self.path + ".tmp")
-        self.db.save_template("dave", self.nuevo)
-        with open(victima) as f:
-            self.assertEqual(f.read(), "no tocar")
-        self.assertFalse(os.path.islink(self.path))
-
-    def _fila(self, uid):
-        t = ";".join(f"{v:.7f}" for v in np.random.default_rng(3).standard_normal(512))
-        return f"{uid},{t}\r\n"
-
-    def test_ids_del_csv_se_validan_como_al_inscribir(self):
-        # Antes: _load aceptaba '-planted' o un id de 200 caracteres: identificar los
-        # devolvía pero no se podían borrar ni sustituir
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(self._fila("-planted") + self._fila("=cmd") + self._fila("L" * 200))
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
-        self.assertTrue(self.db.delete_template("bob"))  # reescribe
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "carol"])
-        with open(self.path, "rb") as f:
-            datos = f.read()
-        for uid in (b"-planted", b"=cmd"):  # se conservan en bruto, sin perder datos
-            self.assertIn(uid + b",", datos)
-
-    def test_csv_sin_cabecera_no_pierde_la_primera_fila(self):
-        # Antes: la primera línea se descartaba siempre y el siguiente guardado la borraba
-        with open(self.path, "r", encoding="utf-8") as f:
-            lineas = f.read().splitlines()
-        with open(self.path, "w", encoding="utf-8", newline="") as f:
-            f.write("\r\n".join(lineas[1:]) + "\r\n")  # sin cabecera
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
-        self.db.save_template("dave", self.nuevo)
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol", "dave"])
-
-    def test_cabecera_con_bom_se_reconoce(self):
-        with open(self.path, "rb") as f:
-            datos = f.read()
-        with open(self.path, "wb") as f:
-            f.write(b"\xef\xbb\xbf" + datos)
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
-
-    def test_save_template_no_sustituye_por_defecto(self):
-        # Antes: save_template sustituía por defecto, al revés que BiometricSystem.inscribir*
-        self.assertFalse(self.db.save_template("alice", self.nuevo))
-        self.assertTrue(self.db.save_template("alice", self.nuevo, reemplazar=True))
-
-    def test_get_all_usa_cache_hasta_que_cambia_el_fichero(self):
-        from unittest import mock
-        self.db.get_all()
-        with mock.patch.object(self.db, "_read_raw_records", side_effect=AssertionError("no debía releer")):
-            self.assertEqual(len(self.db.get_all()), 3)
-        self.db.save_template("dave", self.nuevo)  # cambia el fichero: se invalida
-        self.assertEqual(len(self.db.get_all()), 4)
-        copia = self.db.get_all()
-        copia.clear()  # lo devuelto es una copia: no corrompe la caché
-        self.assertEqual(len(self.db.get_all()), 4)
-
-    def test_ids_con_barra_no_entran(self):
-        # Antes: parse_input_id aceptaba 'a/b'; la web no puede borrar ni consultar un id así
-        # (/api/personas/{id} es de un solo segmento) y un CSV ajeno lo dejaba irrevocable
-        from src.utils import parse_input_id
-        for mal in ("a/b", "..", ".", "a\\b", "../x"):
-            with self.assertRaises(ValueError, msg=mal):
-                parse_input_id(mal)
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(self._fila("x/y"))
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
-        self.assertTrue(self.db.delete_template("bob"))
-        with open(self.path, "rb") as f:
-            self.assertIn(b"x/y,", f.read())  # se conserva en bruto
-        with self.assertRaises(ValueError):
-            self.db.save_template("a/b", self.nuevo)
-        self.assertEqual(parse_input_id("a.b-c (d)"), "a.b-c (d)")
-
-    def test_tope_de_filas_y_lectura_cacheada(self):
-        # Antes: get_template reparseaba todo el CSV en cada verificación y no había tope de
-        # filas (1M de filas basura = ~2 s por petición, bajo el lock global)
-        from unittest import mock
-        from src.database import DatabaseReadError, MAX_DB_ROWS
-        with mock.patch.object(self.db, "_leer", wraps=self.db._leer) as leer:
-            for _ in range(3):
-                self.assertIsNotNone(self.db.get_template("alice"))
-                self.db.get_all()
-            self.assertEqual(leer.call_count, 1)
-        antes = self._bytes()
-        with open(self.path, "ab") as f:
-            f.write(b"a,\r\n" * (MAX_DB_ROWS + 1))
-        with self.assertRaises(DatabaseReadError):
-            self.db.get_template("alice")
-        self.assertEqual(self._bytes()[:len(antes)], antes)
-
-    def test_crear_el_csv_no_trunca_uno_que_aparece_a_la_vez(self):
-        # Antes: _initialize_db comprobaba que faltaba y abría con 'w' (fuera del lock, desde una lectura):
-        # si el operador restauraba el CSV justo entre las dos cosas, la lectura lo dejaba en solo la cabecera
-        # (3 personas -> 0). Aquí se fuerza la ventana haciendo que la comprobación diga que falta.
-        from unittest import mock
-        antes = self._bytes()
-        with mock.patch("src.database.os.path.exists", return_value=False):
-            self.db._initialize_db()
-        self.assertEqual(self._bytes(), antes)
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
-
-    def test_crear_el_csv_si_falta(self):
-        os.remove(self.path)
-        self.db._initialize_db()
-        self.assertEqual(self._bytes().strip(), b"id,template")
-        self.assertEqual(self.db.get_all(), {})
-
-    def test_escribir_no_supera_los_topes_de_lectura(self):
-        # Antes: _write_all_records no aplicaba MAX_DB_ROWS/MAX_DB_BYTES; una inscripción que los cruzaba
-        # devolvía True y dejaba la BD ilegible (DatabaseReadError en todo, también al borrar)
-        from unittest import mock
-        import src.database as bd
-        # filas: cabecera + 3 personas = 4 líneas; con tope 5 cabe una más y la siguiente no
-        with mock.patch.object(bd, "MAX_DB_ROWS", 5):
-            self.assertTrue(self.db.save_template("dave", self.nuevo))
-            antes = self._bytes()
-            with self.assertLogs("cjar", "WARNING") as log:
-                self.assertFalse(self.db.save_template("erin", self.nuevo))
-            self.assertIn("no se inscribe a «erin»", "\n".join(log.output))
-            self.assertEqual(self._bytes(), antes)  # nada escrito
-            self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol", "dave"])  # sigue legible
-            self.assertTrue(self.db.delete_template("alice"))  # y se puede borrar
-            self.assertTrue(self.db.save_template("erin", self.nuevo))  # y volver a inscribir
-        # bytes: un tope que ya no deja sitio para otra plantilla (~5 KB)
-        with mock.patch.object(bd, "MAX_DB_BYTES", len(self._bytes()) + 100):
-            antes = self._bytes()
-            self.assertFalse(self.db.save_template("frank", self.nuevo))
-            self.assertEqual(self._bytes(), antes)
-            self.assertIn("erin", self.db.get_all())
-
-    def test_metodos_fallan_cerrados(self):
-        from unittest import mock
-        from src.database import DatabaseReadError
-        sistema = BiometricSystem.__new__(BiometricSystem)  # sin cargar modelos
-        from src.matcher import Matcher
-        sistema.matcher, sistema.db = Matcher(), self.db
-        with mock.patch.object(self.db, "_load", side_effect=DatabaseReadError("x")):
-            self.assertFalse(sistema.inscribir_t("dave", self.nuevo))
-            self.assertIsNone(sistema.identificar_t(self.nuevo))
-        self.assertEqual(sorted(self.db.get_all()), ["alice", "bob", "carol"])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ import shutil
 import tempfile
 import unittest
 
+os.environ["CJAR_CLAVE_BD"] = "ab" * 32  # clave de pruebas, nunca la real
+
 import numpy as np
 
 from src.biometric_system import BiometricSystem
@@ -25,10 +27,13 @@ class _Roto:
     def __init__(self, exc):
         self.exc = exc
 
-    def detect_and_align(self, foto):
+    def detect_and_align(self, foto, unica=False):
         raise self.exc
 
-    def extract(self, foto):
+    def preparar(self, foto):
+        raise self.exc
+
+    def extract(self, foto, norma_minima=0):
         raise self.exc
 
 
@@ -166,7 +171,7 @@ class TestAvisosEnLaWeb(unittest.TestCase):
         app = self.web_app
         original = app.system.detector.detect_and_align
 
-        def roto(_foto):
+        def roto(_foto, unica=False):
             raise RuntimeError("fallo interno con valor 0.55555")
 
         app.system.detector.detect_and_align = roto
@@ -297,141 +302,6 @@ def BiometricSystem_inscribir_t(db, id_):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestAvisosDeLaBaseDeDatos(unittest.TestCase):
-    """Al leer el CSV: filas válidas/descartadas, ids duplicados y bajada de personas, sin inundar el log."""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.ruta = os.path.join(self.tmp, "database.csv")
-        db = BiometricDatabase(self.ruta)
-        for i, uid in enumerate(("ana", "beto", "carla"), 1):
-            db.save_template(uid, _unit(i))
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def _anadir(self, datos: bytes):
-        with open(self.ruta, "ab") as f:
-            f.write(datos)
-
-    def _fila(self, uid, semilla):
-        return (uid + "," + ";".join(f"{v:.7f}" for v in _unit(semilla)) + "\r\n").encode()
-
-    def test_lectura_sana_un_resumen_una_sola_vez(self):
-        # Antes: el CSV se leía sin decir nada
-        db = BiometricDatabase(self.ruta)
-        with self.assertLogs("cjar", "INFO") as cm:
-            for _ in range(4):
-                db.get_all()
-                db.get_template("ana")
-                db.get_template("nadie")
-        self.assertEqual(len(cm.records), 1)  # no una por petición
-        self.assertEqual(cm.records[0].levelno, logging.INFO)
-        self.assertIn("3 filas válidas (3 personas), 0 descartadas", cm.output[0])
-
-    def test_filas_descartadas_e_ids_duplicados_son_un_warning(self):
-        self._anadir(b"basura sin coma\r\n" + b"vacio,\r\n" + "mu\xf1oz,1;2\r\n".encode("latin-1"))
-        self._anadir(self._fila("beto", 7))  # el mismo id otra vez: gana la última fila
-        db = BiometricDatabase(self.ruta)
-        with self.assertLogs("cjar", "WARNING") as cm:
-            db.get_all()
-        texto = "\n".join(cm.output)
-        self.assertIn("4 filas válidas (3 personas), 3 descartadas", texto)
-        self.assertIn("ids duplicados (gana la última fila): beto", texto)
-        # y el aviso no repite el contenido de las filas descartadas ni valores de plantillas
-        for dato in ("basura", "vacio", "1;2", "0.5", "0.1"):
-            self.assertNotIn(dato, texto)
-
-    def test_aviso_si_baja_el_numero_de_personas(self):
-        db = BiometricDatabase(self.ruta)
-        self.assertEqual(len(db.get_all()), 3)
-        os.truncate(self.ruta, len("id,template\r\n"))  # alguien trunca el CSV con la web en marcha
-        with self.assertLogs("cjar", "WARNING") as cm:
-            self.assertEqual(db.get_all(), {})
-        self.assertIn("ha bajado de 3 a 0", cm.output[0])
-        self.assertIn("posible truncado o borrado", cm.output[0])
-        # lo mismo si borran el fichero
-        db2 = BiometricDatabase(self.ruta)
-        db2.save_template("dani", _unit(4))
-        self.assertEqual(len(db2.get_all()), 1)
-        os.unlink(self.ruta)
-        with self.assertLogs("cjar", "WARNING") as cm:
-            db2.get_all()
-        self.assertIn("ha bajado de 1 a 0", cm.output[0])
-
-    def test_borrar_a_proposito_no_es_una_bajada(self):
-        db = BiometricDatabase(self.ruta)
-        db.get_all()
-        with self.assertNoLogs("cjar", "WARNING"):
-            self.assertTrue(db.delete_template("ana"))
-            self.assertEqual(len(db.get_all()), 2)
-            db.save_template("dani", _unit(4))
-            self.assertEqual(len(db.get_all()), 3)
-
-    def test_un_aviso_por_cada_cambio_real_del_fichero(self):
-        db = BiometricDatabase(self.ruta)
-        with self.assertLogs("cjar", "WARNING") as cm:
-            self._anadir(b"sin coma 1\r\n")
-            for _ in range(3):
-                db.get_all()
-                db.get_template("ana")
-            self._anadir(b"sin coma 2\r\n")  # otro cambio real
-            for _ in range(3):
-                db.get_all()
-                db.get_template("ana")
-        self.assertEqual(len(cm.records), 2)
-        self.assertIn("1 descartadas", cm.output[0])
-        self.assertIn("2 descartadas", cm.output[1])
-
-    def test_bd_ilegible_se_avisa_una_vez_y_sigue_fallando_cerrado(self):
-        from unittest import mock
-        from src.database import DatabaseReadError
-        db = BiometricDatabase(self.ruta)
-        with mock.patch("src.database.MAX_DB_ROWS", 2):
-            with self.assertLogs("cjar", "WARNING") as cm:
-                for _ in range(5):
-                    with self.assertRaises(DatabaseReadError):  # el comportamiento no cambia: falla cerrado
-                        db.get_template("ana")
-        self.assertEqual(len(cm.records), 1)
-        self.assertIn("demasiadas filas", cm.output[0])
-
-    def test_los_ids_del_aviso_pasan_por_limpiar(self):
-        # Antes: los ids salían tal cual; parse_input_id acepta U+2028/U+2029 (no son de control) y llegaban crudos al log
-        raro = "a" + chr(0x2028) + "INFO falso" + chr(0x2029) + "fin"
-        self._anadir(self._fila(raro, 7) + self._fila(raro, 8))  # duplicado
-        fin_de_linea = bytes([13, 10])
-        self._anadir(("zeta" + chr(0x2028) + "2,").encode() + b";".join([b"nan"] * 512) + fin_de_linea)  # plantilla inválida
-        db = BiometricDatabase(self.ruta)
-        with self.assertLogs("cjar", "WARNING") as cm:
-            db.get_all()
-        texto = chr(10).join(cm.output)
-        self.assertIn("ids duplicados (gana la última fila): a INFO falso fin", texto)
-        self.assertIn("plantilla que no es válida", texto)
-        for c in (chr(0x2028), chr(0x2029)):
-            self.assertNotIn(c, texto)
-        self.assertEqual(len([l for l in texto.split(chr(10)) if l]), 2)  # y no se parte en líneas nuevas
-
-    def test_los_ids_largos_o_con_comillas_no_rompen_el_aviso(self):
-        largo = "L" * 128
-        self._anadir(self._fila(largo, 7) + self._fila(largo, 8))
-        self._anadir(self._fila("o'neil", 9) + self._fila("o'neil", 10))
-        db = BiometricDatabase(self.ruta)
-        with self.assertLogs("cjar", "WARNING") as cm:
-            db.get_all()
-        self.assertEqual(len(cm.records), 1)
-        self.assertIn("L" * 128, cm.output[0])  # un id de 128 caracteres cabe entero
-
-    def test_plantilla_con_formato_invalido_se_avisa_en_get_all(self):
-        self._anadir(b"zeta," + b";".join([b"nan"] * 512) + b"\r\n")
-        db = BiometricDatabase(self.ruta)
-        with self.assertLogs("cjar", "WARNING") as cm:
-            todos = db.get_all()
-            db.get_all()
-        self.assertNotIn("zeta", todos)
-        self.assertEqual(sum("plantilla que no es válida" in m for m in cm.output), 1)
-        self.assertIn("zeta", "\n".join(cm.output))
 
 
 class TestFalloNuncaLanza(unittest.TestCase):

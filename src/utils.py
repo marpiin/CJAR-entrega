@@ -14,15 +14,14 @@ from pathlib import Path
 from typing import Optional, Union, List, Tuple
 
 # Límites contra "bombas" de imagen: un PNG de pocos KB puede declarar 50000x50000 px
-# y agotar la memoria al decodificarlo. El límite de OpenCV se fija en src/__init__.py, pero solo
-# vale si `src` se importa antes que cv2 (web/app.py importa cv2 primero: allí lo cubre el ENV del
-# Dockerfile). Ver el docstring de src/__init__.py.
+# y agotar la memoria al decodificarlo. El límite de OpenCV se fija en src/__init__.py, que se tiene
+# que importar antes que cv2.
 from src import MAX_IMAGE_PIXELS
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -53,6 +52,10 @@ def parse_input_id(user_id) -> str:
         raise ValueError("El 'id' contiene caracteres de control.")
     if clean[0] in "=+-@":
         raise ValueError("El 'id' no puede empezar por '=', '+', '-' ni '@'.")
+    if any(unicodedata.category(c) in ("Zl", "Zp") for c in clean):
+        raise ValueError("El 'id' contiene separadores de línea.")
+    if clean.casefold() == "__sello__" or clean[0] == "~":
+        raise ValueError("El 'id' está reservado para la base de datos.")
     if "/" in clean or "\\" in clean or clean in (".", ".."):
         # La API direcciona a las personas por /api/personas/{id}: un id con barra no se
         # podría consultar ni borrar desde la web
@@ -73,31 +76,63 @@ def _decode_bytes(data: bytes) -> Optional[np.ndarray]:
         return None
     if len(data) > MAX_IMAGE_BYTES:
         raise ValueError("La imagen es demasiado grande.")
+    varias = transparente = False
     # Pillow lee solo la cabecera: así se rechaza una imagen gigante antes de decodificarla
     try:
         with Image.open(io.BytesIO(data)) as probe:
             width, height = probe.size
+            if getattr(probe, "is_animated", False) and probe.format in ("GIF", "PNG", "WEBP", "TIFF"):
+                varias = True  # solo se usaría el primer fotograma: no es lo que ve quien abre el fichero
+            elif width * height <= MAX_IMAGE_PIXELS and (probe.mode in ("RGBA", "LA", "PA") or "transparency" in probe.info):
+                alfa = np.asarray(probe.convert("RGBA").getchannel("A"))
+                transparente = float((alfa < 250).mean()) > 0.01  # lo transparente no se ve, pero la red sí lo lee
     except Image.DecompressionBombError:
         raise ValueError("La imagen tiene demasiados píxeles.")
     except Exception:
         width = height = 0  # formato que Pillow no reconoce: OpenCV aplica su propio límite
     if width * height > MAX_IMAGE_PIXELS:
         raise ValueError("La imagen tiene demasiados píxeles.")
+    if varias or transparente:
+        raise ValueError("No se admiten imágenes animadas, de varias páginas o con transparencia.")
     try:
         img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     except cv2.error:
         raise ValueError("La imagen tiene demasiados píxeles o no es válida.")
     if img is not None:
-        # Última barrera por si OpenCV se importó antes de fijar su límite (ocurre en web/app.py fuera de Docker)
+        # Última barrera por si OpenCV se importó antes de fijar su límite
         if img.shape[0] * img.shape[1] > MAX_IMAGE_PIXELS:
             raise ValueError("La imagen tiene demasiados píxeles.")
         return img
     try:
         with Image.open(io.BytesIO(data)) as pil_img:
-            rgb = np.asarray(pil_img.convert("RGB"))
+            # OpenCV aplica la orientación EXIF al decodificar; aquí hay que hacerlo a mano
+            rgb = np.asarray(ImageOps.exif_transpose(pil_img).convert("RGB"))
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     except Exception:
         return None
+
+
+def _a_uint8(foto: np.ndarray) -> np.ndarray:
+    """
+    Pasa a uint8 un array de otro tipo respetando su escala. Antes se recortaba a 0-255: una foto float en
+    0-1 (skimage, PyTorch) quedaba negra y una uint16 quedaba blanca, así que TODAS las caras daban casi la
+    misma plantilla (dos personas distintas llegaban a similitud 1,0). Lo que no tiene una escala
+    reconocible se rechaza en vez de adivinar.
+    """
+    if not (np.issubdtype(foto.dtype, np.integer) or np.issubdtype(foto.dtype, np.floating)):
+        raise ValueError(f"Tipo de píxel no soportado: {foto.dtype}")
+    if not np.all(np.isfinite(foto)):
+        raise ValueError("La imagen contiene valores NaN o infinitos.")
+    minimo, maximo = float(foto.min()), float(foto.max())
+    if minimo < 0:
+        raise ValueError("La imagen contiene valores negativos.")
+    if foto.dtype == np.uint16 and maximo > 255:
+        return (foto // 257).astype(np.uint8)
+    if np.issubdtype(foto.dtype, np.floating) and maximo <= 1.0:
+        return np.rint(foto.astype(np.float64) * 255).astype(np.uint8)
+    if maximo > 255:
+        raise ValueError("La imagen contiene valores mayores que 255.")
+    return np.rint(foto).astype(np.uint8)
 
 
 def parse_input_image(foto: Union[str, Path, np.ndarray, bytes]) -> np.ndarray:
@@ -114,6 +149,9 @@ def parse_input_image(foto: Union[str, Path, np.ndarray, bytes]) -> np.ndarray:
 
     if isinstance(foto, (str, Path)):
         file_path = str(foto)
+        if file_path.startswith(("\\\\", "//")):
+            # En Windows abrir \\servidor\recurso envía el hash de la contraseña del usuario a ese servidor
+            raise ValueError("No se admiten rutas de red.")
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"No existe el archivo de imagen en la ruta: {file_path}")
         if os.path.getsize(file_path) > MAX_IMAGE_BYTES:
@@ -143,12 +181,7 @@ def parse_input_image(foto: Union[str, Path, np.ndarray, bytes]) -> np.ndarray:
         if foto.ndim in (2, 3) and foto.shape[0] * foto.shape[1] > MAX_IMAGE_PIXELS:
             raise ValueError("La imagen tiene demasiados píxeles.")
         if foto.dtype != np.uint8:
-            # Arrays float/int/bool: se aceptan solo si son números finitos y se pasan a 0-255
-            if not (np.issubdtype(foto.dtype, np.number) or foto.dtype == bool) or np.iscomplexobj(foto):
-                raise ValueError(f"Tipo de píxel no soportado: {foto.dtype}")
-            if not np.all(np.isfinite(foto)):
-                raise ValueError("La imagen contiene valores NaN o infinitos.")
-            foto = np.clip(foto, 0, 255).astype(np.uint8)
+            foto = _a_uint8(foto)
 
         if foto.ndim == 3 and foto.shape[2] == 1:
             foto = foto[:, :, 0]
@@ -157,8 +190,8 @@ def parse_input_image(foto: Union[str, Path, np.ndarray, bytes]) -> np.ndarray:
 
         if foto.ndim == 3:
             if foto.shape[2] == 4:
-                return cv2.cvtColor(foto, cv2.COLOR_RGBA2BGR)
-            # Con 3 canales se asume que ya está en BGR (como en OpenCV)
+                return cv2.cvtColor(foto, cv2.COLOR_BGRA2BGR)
+            # Con 3 o 4 canales se asume el orden de OpenCV: BGR o BGRA
             if foto.shape[2] == 3:
                 return foto.copy()
             raise ValueError(f"Número de canales no soportado: {foto.shape[2]}")

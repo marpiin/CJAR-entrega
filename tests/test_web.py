@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+os.environ["CJAR_CLAVE_BD"] = "ab" * 32  # clave de pruebas, nunca la real
+
 import numpy as np
 from fastapi.testclient import TestClient
 
@@ -130,7 +132,7 @@ class TestWebBiometria(unittest.TestCase):
         cls.victima = _unit(10)
         web_app.system.db.save_template("victima", cls.victima)
         cls.consulta = _unit(99)  # otra persona: similitud ~0 con la víctima
-        web_app._cara = lambda data, modo: (cls.consulta, np.zeros((112, 112, 3), np.uint8))
+        web_app._cara = lambda data, modo, unica=False: (cls.consulta, np.zeros((112, 112, 3), np.uint8))
         cls.client = TestClient(web_app.app, base_url="http://localhost")
         web_app.ADMIN_TOKEN = CLAVE
         cls.H = {"X-CJAR": "1"}
@@ -353,16 +355,61 @@ class TestWebBiometria(unittest.TestCase):
         # foto de inscripción, que /fotos reserva al administrador
         app = self.web_app
         cara, expl, cara_original = app._cara, app._explicacion, None
-        app._cara = lambda data, modo: (self.victima, np.zeros((112, 112, 3), np.uint8))
-        app._explicacion = lambda *a, **k: {"regiones": [], "mapas": ["propia", "inscrita"]}
+        app._cara = lambda data, modo, unica=False: (self.victima, np.zeros((112, 112, 3), np.uint8))
+        explicar = app.explicador.explicar
+        app.explicador.explicar = lambda *a, **k: {"regiones": [], "mapas": [np.zeros((8, 8, 3), np.uint8)] * 2}
+        estable = app.system.extractor.estable
+        app.system.extractor.estable = lambda *a: True  # la cara de prueba es una imagen negra
         try:
             for ruta, datos in (("/api/verificar", {"id": "victima"}), ("/api/identificar", {})):
                 anonimo = self.post(ruta, datos).json()
-                self.assertEqual(anonimo["explicacion"]["mapas"], ["propia", None], ruta)
+                self.assertIsNone(anonimo["explicacion"], ruta)
                 admin = self.post(ruta, datos, headers={"X-CJAR-Token": CLAVE}).json()
-                self.assertEqual(admin["explicacion"]["mapas"], ["propia", "inscrita"], ruta)
+                self.assertEqual(len([m for m in admin["explicacion"]["mapas"] if m]), 2, ruta)
+                with app.explicando:  # con otra explicación en marcha se omite, pero la decisión se da igual
+                    r = self.post(ruta, datos, headers={"X-CJAR-Token": CLAVE}).json()
+                    self.assertIsNone(r["explicacion"])
+                    self.assertTrue(r.get("match") or r.get("id") == "victima")
         finally:
-            app._cara, app._explicacion = cara, expl
+            app._cara, app._explicacion, app.explicador.explicar = cara, expl, explicar
+            app.system.extractor.estable = estable
+
+    def test_comparar_no_bloquea_a_los_demas(self):
+        # Antes: 6 hilos anónimos en comparar dejaban 8 de 8 verificaciones legítimas en 503
+        dos = [("foto1", ("1.jpg", b"x")), ("foto2", ("2.jpg", b"x"))]
+        with self.web_app.comparando:
+            self.assertEqual(self.client.post("/api/comparar", files=dos, headers=self.H).status_code, 503)
+            self.assertEqual(self.post("/api/verificar", {"id": "victima"}).status_code, 200)
+            self.assertEqual(self.client.post("/api/comparar", files=dos, headers=ADMIN).status_code, 200)
+        self.assertIsNone(self.client.post("/api/comparar", files=dos, headers=self.H).json()["explicacion"])
+
+    def test_imagen_adversaria_por_la_web(self):
+        # El template coincide, pero la imagen no aguanta el suavizado: ni match ni explicación
+        app = self.web_app
+        cara = app._cara
+        app._cara = lambda data, modo, unica=False: (self.victima, np.zeros((112, 112, 3), np.uint8))
+        try:
+            r = self.post("/api/verificar", {"id": "victima"}).json()
+            self.assertEqual((r["match"], r["explicacion"]), (False, None))
+            self.assertIsNone(self.post("/api/identificar").json()["id"])
+        finally:
+            app._cara = cara
+
+    def test_inscribir_a_quien_ya_esta_con_otro_id(self):
+        app = self.web_app
+        cara = app._cara
+        app._cara = lambda data, modo, unica=False: (self.victima, np.zeros((112, 112, 3), np.uint8))
+        try:
+            r = self._inscribir_real("otro_id")
+            self.assertEqual((r.status_code, r.json()["detail"]["motivo"]), (409, "parecido"))
+            r = self._inscribir_real("Victima")
+            self.assertEqual((r.status_code, r.json()["detail"]["motivo"]), (409, "parecido"))
+            self.assertIsNone(app.system.db.get_template("otro_id"))
+            r = self._inscribir_real("otro_id", permitir_parecido="true")
+            self.assertEqual(r.status_code, 200)
+            app.system.db.delete_template("otro_id")
+        finally:
+            app._cara = cara
 
     def _jpeg(self):
         import cv2
