@@ -1,5 +1,5 @@
 # Generado con uv pip compile --generate-hashes: cada paquete con su SHA-256 (pip install --require-hashes --no-deps).
-# Sin opencv-python a propósito: insightface lo pide, pero el código usa el build headless (sin Qt/X11).
+# Sin opencv-python a proposito: insightface lo pide, pero el codigo usa el build headless (sin Qt/X11).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
     --hash=sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb

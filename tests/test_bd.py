@@ -283,12 +283,14 @@ class TestFuncionamiento(Base):
                 except Exception as exc:
                     errores.append(exc)
 
-        hilos = [threading.Thread(target=leer) for _ in range(4)]
+        hilos = [threading.Thread(target=leer, daemon=True) for _ in range(4)]
         [h.start() for h in hilos]
-        for k in range(25):
-            self.db.save_template("z", _unit(300 + k), reemplazar=True)
-        fin.set()
-        [h.join() for h in hilos]
+        try:
+            for k in range(25):
+                self.assertTrue(self.db.save_template("z", _unit(300 + k), reemplazar=True))
+        finally:
+            fin.set()
+            [h.join() for h in hilos]
         self.assertEqual(errores, [])
 
     def test_crear_no_pisa_un_fichero_existente(self):

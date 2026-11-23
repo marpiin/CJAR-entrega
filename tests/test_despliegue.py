@@ -46,6 +46,9 @@ class TestDespliegue(unittest.TestCase):
             self.assertGreater(len(paquetes), 30)
             self.assertNotIn("opencv-python", paquetes)  # el build con Qt: solo el headless
             self.assertGreaterEqual(leer(fichero).count("--hash=sha256:"), len(paquetes))
+        for fichero in RAIZ.glob("requirements*"):
+            # pip lo lee con la codificación de Windows: una tilde en un comentario lo rompe
+            self.assertTrue(fichero.read_bytes().isascii(), fichero.name)
 
     def test_clave_de_la_bd_fuera_de_la_imagen_y_de_la_bd(self):
         self.assertIn("./clave:/app/clave:ro", leer("docker-compose.yml"))

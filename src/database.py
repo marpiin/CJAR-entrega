@@ -24,6 +24,7 @@ import io
 import os
 import tempfile
 import threading
+import time
 import unicodedata
 from contextlib import contextmanager
 from typing import Dict, Optional, Tuple
@@ -95,6 +96,19 @@ def esqueleto(uid: str) -> str:
     # Cifras que imitan letras (a1ice, 4lice), salvo las del final (juan5 y juans son ids distintos)
     nombre = letras.rstrip("0123456789")
     return (nombre.translate(str.maketrans("014358", "oiaesb")).replace("l", "i") + letras[len(nombre):]) or t
+
+
+def _reintentar(operacion):
+    """
+    Windows no deja sustituir un fichero que otro hilo está leyendo, ni leerlo justo mientras se sustituye: da
+    PermissionError durante un instante. Se reintenta hasta ~2 s; en Linux el primer intento ya es definitivo.
+    """
+    for _ in range(40 if os.name == "nt" else 0):
+        try:
+            return operacion()
+        except PermissionError:
+            time.sleep(0.05)
+    return operacion()
 
 
 class BiometricDatabase:
@@ -320,7 +334,7 @@ class BiometricDatabase:
         # Se toma ANTES de abrir: si otro hilo escribe a mitad, leer la versión que había al empezar es correcto
         minimo = self._max_contador
         try:
-            with open(self.csv_path, mode="rb") as f:
+            with _reintentar(lambda: open(self.csv_path, mode="rb")) as f:
                 datos = f.read(MAX_DB_BYTES + 1)  # nunca se carga entero un fichero enorme
         except FileNotFoundError as err:
             raise self._error_lectura("el fichero no existe") from err
@@ -391,7 +405,7 @@ class BiometricDatabase:
                 os.fsync(f.fileno())
             if hasattr(os, "chmod"):
                 os.chmod(tmp_path, 0o644)
-            os.replace(tmp_path, self.csv_path)
+            _reintentar(lambda: os.replace(tmp_path, self.csv_path))
         except BaseException:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
